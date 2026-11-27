@@ -100,14 +100,14 @@ bool sameProbeGrid(const GiProbeGrid &grid, const ProbeGridUniformData &packed,
         || packed.countMeta[1] != static_cast<float>(header.directionResolution)
         || packed.countMeta[2] != static_cast<float>(header.level0ProbeOffset)
         || packed.countMeta[3] != static_cast<float>(header.level1ProbeOffset)
-        || packedRecords.size() != static_cast<std::size_t>(grid.probeCount) * giProbeRecordVec4s)
+        || packedRecords.size() != static_cast<std::size_t>(grid.probeCount) * giProbeRecordFloats)
     {
         return false;
     }
     for (std::uint32_t index = 0; index < grid.probeCount; ++index)
     {
         const radiance_cache::GiProbe &probe = grid.probes[index];
-        const float                   *record = packedRecords.data() + static_cast<std::size_t>(index) * giProbeRecordVec4s;
+        const float                   *record = packedRecords.data() + static_cast<std::size_t>(index) * giProbeRecordFloats;
         if (record[0] != probe.position[0] || record[1] != probe.position[1] || record[2] != probe.position[2]
             || record[3] != probe.validity)
         {
@@ -227,7 +227,6 @@ std::unique_ptr<RenderBackend> VulkanBackend::create(window::WindowHandle surfac
 {
     auto backend                               = std::unique_ptr<VulkanBackend>(new VulkanBackend());
     backend->surfaceHandle_                    = surface;
-    backend->vsync_                            = vsync;
     backend->framesInFlight_                   = framesInFlight != 0 ? framesInFlight : defaultMaxFramesInFlight;
     backend->memoryBudgetUpdateIntervalFrames_ = memoryBudgetUpdateIntervalFrames;
     backend->frustumCullingEnabled_            = frustumCullingEnabled;
@@ -236,8 +235,6 @@ std::unique_ptr<RenderBackend> VulkanBackend::create(window::WindowHandle surfac
 
     backend->msaaSamples_                    = VK_SAMPLE_COUNT_1_BIT;
     const std::uint32_t requestedMsaaSamples = msaaSamples;
-
-    backend->dynamicRenderingEnabled_ = false;
     // Instance stream capacity: clamped 1..64 MiB, halved on allocation
     // failure inside createInstanceBuffers.
     const std::uint32_t boundedInstanceStreamMb = std::clamp(instanceStreamMegabytes, 1u, 64u);
@@ -381,9 +378,17 @@ std::unique_ptr<RenderBackend> VulkanBackend::create(window::WindowHandle surfac
 
     // srgbOutput_ was already handed to the swapchain before pickFormats();
     // only the sample count remains to be applied before creating objects.
+    // The dynamic-rendering path receives a NULL render pass (its framebuffers
+    // never exist and its attachments are declared inline); the legacy path
+    // receives the real object. Passing the render pass on the dynamic path
+    // built 1-sample framebuffers against the multisample render pass and
+    // kept them as dead-but-invalid objects.
     backend->swapchain_->setSampleCount(backend->msaaSamples_);
     if (!backend->swapchain_->createObjects(
-            backend->pipeline_->renderPass(), backend->viewportWidth_, backend->viewportHeight_, backend->framesInFlight_))
+            backend->pipeline_->dynamicRenderingEnabled() ? VK_NULL_HANDLE : backend->pipeline_->renderPass(),
+            backend->viewportWidth_,
+            backend->viewportHeight_,
+            backend->framesInFlight_))
     {
         std::fprintf(stderr, "renderer module: could not create the swapchain\n");
         reportError(error, RenderError::CreationFailed);
@@ -426,11 +431,16 @@ void VulkanBackend::warmUpPipelines()
         "before the frame loop starts...\n");
 
     // Mesh ids belong to the module wrapper, which is not involved here; pick
-    // any id resources_ has not interned and use it only inside this call.
-    MeshHandle warmUpMesh = 1;
+    // an id from the TOP of the handle space. The wrapper assigns application
+    // mesh ids sequentially from 1, so squatting handle 1 (the old warm-up
+    // choice) blocked the application's first createMesh until the deferred
+    // destroy drained at the next beginFrame; the top of the space is
+    // unreachable by the sequential counter in any practical lifetime.
+    constexpr MeshHandle warmUpMeshHandle = 0xFFFFFFF0u;
+    MeshHandle           warmUpMesh      = warmUpMeshHandle;
     while (warmUpMesh != invalidMesh && resources_->meshFor(warmUpMesh) != nullptr)
     {
-        ++warmUpMesh;
+        --warmUpMesh;
     }
     if (warmUpMesh == invalidMesh)
     {
@@ -498,6 +508,10 @@ void VulkanBackend::warmUpPipelines()
         .displayPosition                          = {0.0f, 0.0f},
         .displaySize                              = {320.0f, 240.0f},
         .framebufferScale                         = {1.0f, 1.0f}};
+    // The slot the warm-up submission lands on (valid once a frame actually
+    // rendered); captured before endFrame rotates the scheduler so the
+    // retirement wait below can target it.
+    std::uint32_t warmUpSubmittedSlot = frames_->framesInFlight();
     for (std::uint32_t attempt = 0; attempt < maximumWarmUpAttempts && statistics_.framesRendered == framesBeforeWarmUp;
         ++attempt)
     {
@@ -508,6 +522,7 @@ void VulkanBackend::warmUpPipelines()
             static constexpr float identityModel[16]
                 = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
             const MeshMaterial warmUpMaterial{}; // every texture invalid -> neutral stand-ins
+            warmUpSubmittedSlot = frames_->currentFrame();
             drawMesh(warmUpMesh, identityModel, warmUpMaterial);
             drawOverlay(warmUpOverlayData);
             endFrame();
@@ -527,9 +542,15 @@ void VulkanBackend::warmUpPipelines()
     else
     {
         // Wait (bounded) until the warm-up submission retires: this is where
-        // a deferred driver compilation completes. waitForFrameSlot caps each
-        // wait at 1s and logs its own stall notices; the deadline bounds the
-        // total so a wedged driver cannot hang renderer creation forever.
+        // a deferred driver compilation completes. waitForSlotRetirement
+        // targets the slot the warm-up actually submitted on - endFrame
+        // already rotated the scheduler, so the plain waitForFrameSlot
+        // would wait the NEXT slot (its initially-signaled fence returns
+        // immediately and proves nothing, leaving the destroy below a
+        // use-after-free against a submission still sitting in the driver's
+        // compile queue). Each wait round is capped (50 ms, 1 s after
+        // repeated stalls) and the deadline bounds the total so a wedged
+        // driver cannot hang renderer creation forever.
         // The explicit progress line below exists because a cold driver shader
         // cache turns this wait into a 30-120s, all-core, loud-fan compile:
         // without a named message users read that as a hang and kill the
@@ -538,7 +559,7 @@ void VulkanBackend::warmUpPipelines()
         const auto warmUpDeadline       = std::chrono::steady_clock::now() + std::chrono::seconds(120);
         auto       lastCompileNotice    = warmUpStart;
         constexpr auto compileNoticeGap = std::chrono::seconds(10);
-        while (!frames_->waitForFrameSlot())
+        while (!frames_->waitForSlotRetirement(warmUpSubmittedSlot))
         {
             const auto now = std::chrono::steady_clock::now();
             if (now >= warmUpDeadline)
@@ -581,10 +602,17 @@ void VulkanBackend::warmUpPipelines()
         "renderer module: warm-up frame done in %.1f s\n",
         static_cast<double>(warmUpMilliseconds) / 1000.0);
 
-    // The warm-up submission has retired (or we gave up waiting with a log),
-    // so nothing references the 3-vertex buffers anymore; resources_ destroys
-    // them immediately and the wait above is what makes that safe.
-    resources_->destroyMesh(warmUpMesh);
+    // The warm-up submission may or may not have retired (the wait above is
+    // bounded and gives up with a log after 120 s - a cold driver shader
+    // compile can legitimately take that long), so nothing may free the
+    // 3-vertex buffers while the submission still references them. The
+    // backend's own destroyMesh is the safe route: between frames it queues
+    // on the slot the warm-up just submitted, whose drain runs only after
+    // that slot's fence provably retired - and at teardown the destructor's
+    // waitForDeviceQuiet covers whatever is still queued. (A direct
+    // resources_->destroyMesh here was a use-after-free window whenever the
+    // bounded wait gave up first.)
+    destroyMesh(warmUpMesh);
 }
 
 // Tear-down order matters: wait idle, drop per-frame scratch, then
@@ -642,6 +670,35 @@ void VulkanBackend::waitForDeviceQuiet()
         frames_->waitForAll();
     }
     device_->collectCompletedUploads();
+}
+
+// A frame that acquired an image but never submitted must leave the slot
+// usable: the acquire-side semaphore is replaced (the acquire signaled the
+// binary semaphore and nothing will wait it; vkAcquireNextImageKHR requires
+// the semaphore it receives to be unsignaled), and when beginFrame already
+// reset the slot fence for the abandoned frame an empty queue submission
+// re-signals it - a fence no submission will ever signal would wedge the
+// slot (every later beginFrame on it would time out and skip, forever).
+void VulkanBackend::abandonAcquiredImage(bool slotFenceWasReset)
+{
+    if (frames_ == nullptr)
+    {
+        return;
+    }
+    frames_->resetImageAvailableSemaphore();
+    if (slotFenceWasReset && device_ != nullptr && device_->queue() != VK_NULL_HANDLE)
+    {
+        const VkFence fence = frames_->inFlightFence();
+        if (fence != VK_NULL_HANDLE)
+        {
+            // An empty batch: the fence signals once the (empty) submission
+            // completes, immediately in practice. VUID requires the fence to
+            // be unsignaled - exactly the state the abandoned frame left it
+            // in (the failed submit never signaled it).
+            std::lock_guard queueLock(device_->queueMutex());
+            (void)vkQueueSubmit(device_->queue(), 0, nullptr, fence);
+        }
+    }
 }
 
 void VulkanBackend::setViewport(std::uint32_t width, std::uint32_t height)
@@ -754,6 +811,20 @@ void VulkanBackend::setProbeGrid(const GiProbeGrid &grid)
     if (grid.valid())
     {
         const radiance_cache::GiProbeHeader &header = grid.header;
+        // The shader consumes the header without the checks the CPU twin
+        // runs (buildProbeLevels); giProbeHeaderUsable is that shared
+        // predicate (all three dimensions of both levels >= 2, level 0
+        // ordered before level 1, and each level's lattice contained in the
+        // snapshot), so both backends accept exactly the same headers. A
+        // header that fails it keeps the grid inactive here - level1Meta[3]
+        // stays 0 - so the shader falls back to the hemispheric ambient
+        // exactly like the CPU path does.
+        if (!giProbeHeaderUsable(header, grid.probeCount))
+        {
+            probeGridDirty_    = true;
+            frameUniformDirty_ = true;
+            return;
+        }
         for (std::uint32_t axis = 0; axis < 3; ++axis)
         {
             packedProbeGrid_.centerSpacing[axis] = header.gridCenter[axis];
@@ -768,7 +839,7 @@ void VulkanBackend::setProbeGrid(const GiProbeGrid &grid)
         packedProbeGrid_.countMeta[2]     = static_cast<float>(header.level0ProbeOffset);
         packedProbeGrid_.countMeta[3]     = static_cast<float>(header.level1ProbeOffset);
 
-        packedProbeRecords_.reserve(static_cast<std::size_t>(grid.probeCount) * giProbeRecordVec4s);
+        packedProbeRecords_.reserve(static_cast<std::size_t>(grid.probeCount) * giProbeRecordFloats);
         for (std::uint32_t index = 0; index < grid.probeCount; ++index)
         {
             const radiance_cache::GiProbe &probe = grid.probes[index];
@@ -805,24 +876,31 @@ void VulkanBackend::setGatherField(const GatherField &field)
     (void) field;
 }
 
-// Rebuilds the swapchain when it is dirty or the requested viewport no
-// longer matches. A failed recreate leaves frameActive_ false, so the
-// draw/endFrame calls become no-ops for this frame.
+// Rebuilds the swapchain when it is dirty or the resolved extent would
+// actually change. A configured viewport that differs from the surface
+// extent is NOT a rebuild signal: the surface's currentExtent is
+// authoritative (the viewport only fills in on UINT32_MAX compositors), and
+// the viewport instead bounds the drawing viewport/scissor. The old
+// viewport-vs-extent comparison rebuilt (device-idle) every beginFrame
+// whenever the two legitimately differed. A failed recreate leaves
+// frameActive_ false, so the draw/endFrame calls become no-ops for this
+// frame.
 void VulkanBackend::beginFrame(const FrameParameters &frame)
 {
     (void)frame;
     device_->beginFrame(memoryBudgetUpdateIntervalFrames_);
     device_->collectCompletedUploads();
-    if (swapchain_->dirty()
-        || (viewportWidth_ != 0 && viewportHeight_ != 0
-            && (viewportWidth_ != swapchain_->extent().width || viewportHeight_ != swapchain_->extent().height)))
+    if (swapchain_->dirty() || swapchain_->extentWouldChange(viewportWidth_, viewportHeight_))
     {
         // Recreation destroys the readback buffer; complete any pending
         // export first. The flush waits the recording slot's fence, which
         // is precisely "the copy is done" (recreate's device idle would
         // also cover it, but the flush must run before the buffer dies).
         flushPendingExport(true);
-        if (!swapchain_->recreate(pipeline_->renderPass(), viewportWidth_, viewportHeight_, framesInFlight_))
+        if (!swapchain_->recreate(pipeline_->dynamicRenderingEnabled() ? VK_NULL_HANDLE : pipeline_->renderPass(),
+                viewportWidth_,
+                viewportHeight_,
+                framesInFlight_))
         {
             return;
         }
@@ -885,6 +963,22 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     // never abandon a command buffer left in the recording state.
     std::uint32_t imageIndex    = 0;
     VkResult      acquireResult = VK_SUCCESS;
+    // A previous skip path that failed to recreate the slot's acquire
+    // semaphore leaves it null; acquiring without a semaphore (and without a
+    // fence) would leave the image's availability unsynchronized, so the
+    // frame retries the recreation here (a failed creation is typically a
+    // transient allocation failure) and only skips the frame while the
+    // semaphore stays unavailable. Without the retry the slot would never
+    // rotate again: endFrame no-ops on a skipped frame, and every later
+    // beginFrame would park on this same null semaphore.
+    if (frames_->imageAvailableSemaphore() == VK_NULL_HANDLE)
+    {
+        frames_->resetImageAvailableSemaphore();
+        if (frames_->imageAvailableSemaphore() == VK_NULL_HANDLE)
+        {
+            return;
+        }
+    }
     {
         // Acquire is a blocking point of its own: the presentation engine may
         // have no free image yet (queue depth / pacing), which is not GPU
@@ -894,7 +988,10 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     }
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR)
     {
-        if (!swapchain_->recreate(pipeline_->renderPass(), viewportWidth_, viewportHeight_, framesInFlight_))
+        if (!swapchain_->recreate(pipeline_->dynamicRenderingEnabled() ? VK_NULL_HANDLE : pipeline_->renderPass(),
+                viewportWidth_,
+                viewportHeight_,
+                framesInFlight_))
         {
             return;
         }
@@ -913,6 +1010,12 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR)
     {
         std::fprintf(stderr, "renderer module: vkAcquireNextImageKHR failed (%d)\n", (int)acquireResult);
+        // An acquire error (surface lost, device lost) leaves the acquire
+        // semaphore in an undefined state, so the next acquire on the same
+        // handle would be invalid usage: replace it exactly like the sibling
+        // skip paths. The slot fence was not reset yet, so no empty
+        // re-signal submission is needed here.
+        abandonAcquiredImage(false);
         return;
     }
     if (acquireResult == VK_SUBOPTIMAL_KHR)
@@ -949,6 +1052,11 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
                     imageIndex);
                 lastImageStallLog = now;
             }
+            // The acquire already signaled the slot's semaphore and nothing
+            // below will wait it; replace it so the next acquire stays legal
+            // (the slot fence is still signaled from its previous
+            // submission - nothing else to restore on this path).
+            abandonAcquiredImage(false);
             return; // frameActive_ stays false: endFrame() no-ops this frame
         }
     }
@@ -966,6 +1074,11 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     {
         std::fprintf(
             stderr, "renderer module: could not begin command buffer for frame slot %u\n", frames_->currentFrame());
+        // The slot fence was already reset for this frame and no submission
+        // will signal it: replace the semaphore AND re-arm the fence, or the
+        // slot (and the swapchain image whose in-flight fence points at it)
+        // would wedge.
+        abandonAcquiredImage(true);
         return;
     }
     frames_->beginGpuTiming();
@@ -978,12 +1091,14 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     // between frames record their copies before the render pass begins, so
     // every draw this frame binds the freshest simulated geometry.
     retireDynamicMeshStaging(frames_->currentFrame());
+    retireOverlayBuffers(frames_->currentFrame());
     flushPendingMeshUpdates();
 
     hasLastPushConstants_       = false;
     lastBoundPipeline_          = BoundPipeline::Mesh;
     lastMeshDepthWrite_         = true;
     lastMeshTwoSided_           = false;
+    lastMeshTransparent_       = false;
     lastBoundMesh_              = invalidMesh;
     lastBoundMaterialSet_       = VK_NULL_HANDLE;
     lastBoundInstanceOffset_    = 0;
@@ -1094,6 +1209,7 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     {
         vkCmdBeginRenderPass(command, &renderPassBegin, VK_SUBPASS_CONTENTS_INLINE);
     }
+    drawingScopeActive_ = true;
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->pipeline());
     lastBoundPipeline_  = BoundPipeline::Mesh;
     lastMeshDepthWrite_ = true;
@@ -1128,23 +1244,40 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
     }
 
     VkCommandBuffer command = frames_->commandBuffer();
-    // The mesh pipeline has three variant axes: a depth-write twin for
+    // The mesh pipeline has four variant axes: a depth-write twin for
     // backdrop materials (depthWrite off) and a two-sided twin for cloth
     // materials (doubleSided on: cull mode NONE, the fragment stage flips
-    // back-facing normals). Same shaders and layout, depth testing stays on;
-    // switching variants pushes its constants again, like a fur switch does.
-    const bool wantDepthWrite = material.depthWrite;
+    // back-facing normals), plus the transparent pair for materials whose
+    // opacity is below 1 (src-alpha blending, depth write OFF - the
+    // transparent pass the material contract documents; mesh.frag already
+    // writes oColor.a for this blend). Same shaders and layout, depth testing
+    // stays on; switching variants pushes its constants again, like a fur
+    // switch does.
+    const bool wantTransparent = material.opacity < 1.0f;
+    // Transparent draws never write depth (the material contract: depth
+    // writes stay off below opacity 1 so co-transmitted surfaces do not
+    // occlude each other).
+    const bool wantDepthWrite = material.depthWrite && !wantTransparent;
     const bool wantTwoSided   = material.doubleSided;
     if (lastBoundPipeline_ != BoundPipeline::Mesh || lastMeshDepthWrite_ != wantDepthWrite
-        || lastMeshTwoSided_ != wantTwoSided)
+        || lastMeshTwoSided_ != wantTwoSided || lastMeshTransparent_ != wantTransparent)
     {
         // A fur draw (or another mesh variant) last bound a different
         // pipeline; bind the variant this material needs. Push constants
         // must be pushed again: the fur path wrote 128 bytes through its own
         // layout, and relying on the stale first-112-bytes equality across
-        // layout switches is not worth the branch savings.
+        // layout switches is not worth the branch savings. Set 0 rebinds
+        // with it: the overlay layout owns set 0 for its pass (and the fur
+        // layout's set 0 is a different set entirely), and beginFrame is the
+        // only other mesh-path set-0 bind. The fur push-constant cache
+        // clears for the same reason as the mesh one below it: the shared
+        // push-constant bytes now carry this layout's data.
         VkPipeline pipelineVariant = VK_NULL_HANDLE;
-        if (wantTwoSided)
+        if (wantTransparent)
+        {
+            pipelineVariant = wantTwoSided ? pipeline_->pipelineTransparentTwoSided() : pipeline_->pipelineTransparent();
+        }
+        else if (wantTwoSided)
         {
             pipelineVariant = wantDepthWrite ? pipeline_->pipelineTwoSided() : pipeline_->pipelineTwoSidedNoDepthWrite();
         }
@@ -1153,10 +1286,34 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
             pipelineVariant = wantDepthWrite ? pipeline_->pipeline() : pipeline_->pipelineNoDepthWrite();
         }
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineVariant);
-        lastBoundPipeline_      = BoundPipeline::Mesh;
-        lastMeshDepthWrite_     = wantDepthWrite;
-        lastMeshTwoSided_       = wantTwoSided;
+        vkCmdBindDescriptorSets(command,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_->pipelineLayout(),
+            0,
+            1,
+            resources_->frameUniformSetPtr(frames_->currentFrame()),
+            0,
+            nullptr);
+        // The overlay pass leaves its last clip-rectangle scissor bound (and
+        // the mesh-update resume below rebinds this state anyway); every mesh
+        // draw that switches pipelines re-emits the full-drawing-surface
+        // scissor so no later mesh draw renders clipped to a stale overlay
+        // rectangle.
+        {
+            const VkExtent2D    extent = swapchain_->extent();
+            const std::uint32_t width
+                = viewportWidth_ != 0 ? std::min(viewportWidth_, extent.width) : extent.width;
+            const std::uint32_t height
+                = viewportHeight_ != 0 ? std::min(viewportHeight_, extent.height) : extent.height;
+            const VkRect2D scissor{{0, 0}, {width, height}};
+            vkCmdSetScissor(command, 0, 1, &scissor);
+        }
+        lastBoundPipeline_       = BoundPipeline::Mesh;
+        lastMeshDepthWrite_      = wantDepthWrite;
+        lastMeshTwoSided_        = wantTwoSided;
+        lastMeshTransparent_     = wantTransparent;
         hasLastPushConstants_   = false;
+        hasLastFurPushConstants_ = false;
     }
 
     if (frustumCullingEnabled_ && cameraInitialized_ && vulkanMesh->boundsValid && vulkanMesh->indexCount >= 12)
@@ -1369,15 +1526,25 @@ void VulkanBackend::drawMeshInstances(
     {
         VkCommandBuffer command = frames_->commandBuffer();
         // Instanced draws select the mesh pipeline variant from the material
-        // exactly like drawMesh does (depth-write and two-sided twins), so a
-        // mixed draw list never binds a stale variant from a previous call.
-        const bool wantDepthWrite = material.depthWrite;
+        // exactly like drawMesh does (depth-write, two-sided and transparent
+        // twins), so a mixed draw list never binds a stale variant from a
+        // previous call.
+        const bool wantTransparent = material.opacity < 1.0f;
+        const bool wantDepthWrite = material.depthWrite && !wantTransparent;
         const bool wantTwoSided   = material.doubleSided;
         if (lastBoundPipeline_ != BoundPipeline::Mesh || lastMeshDepthWrite_ != wantDepthWrite
-            || lastMeshTwoSided_ != wantTwoSided)
+            || lastMeshTwoSided_ != wantTwoSided || lastMeshTransparent_ != wantTransparent)
         {
+            // See drawMesh's switch block: set 0 (the frame uniform) and the
+            // shared push-constant bytes come back with the pipeline - the
+            // overlay/fur layouts owned both while they ran.
             VkPipeline pipelineVariant = VK_NULL_HANDLE;
-            if (wantTwoSided)
+            if (wantTransparent)
+            {
+                pipelineVariant
+                    = wantTwoSided ? pipeline_->pipelineTransparentTwoSided() : pipeline_->pipelineTransparent();
+            }
+            else if (wantTwoSided)
             {
                 pipelineVariant
                     = wantDepthWrite ? pipeline_->pipelineTwoSided() : pipeline_->pipelineTwoSidedNoDepthWrite();
@@ -1387,10 +1554,30 @@ void VulkanBackend::drawMeshInstances(
                 pipelineVariant = wantDepthWrite ? pipeline_->pipeline() : pipeline_->pipelineNoDepthWrite();
             }
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineVariant);
-            lastBoundPipeline_    = BoundPipeline::Mesh;
-            lastMeshDepthWrite_   = wantDepthWrite;
-            lastMeshTwoSided_     = wantTwoSided;
-            hasLastPushConstants_ = false;
+            vkCmdBindDescriptorSets(command,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline_->pipelineLayout(),
+                0,
+                1,
+                resources_->frameUniformSetPtr(frames_->currentFrame()),
+                0,
+                nullptr);
+            // Same stale-scissor guard as drawMesh's switch block.
+            {
+                const VkExtent2D    extent = swapchain_->extent();
+                const std::uint32_t width
+                    = viewportWidth_ != 0 ? std::min(viewportWidth_, extent.width) : extent.width;
+                const std::uint32_t height
+                    = viewportHeight_ != 0 ? std::min(viewportHeight_, extent.height) : extent.height;
+                const VkRect2D scissor{{0, 0}, {width, height}};
+                vkCmdSetScissor(command, 0, 1, &scissor);
+            }
+            lastBoundPipeline_       = BoundPipeline::Mesh;
+            lastMeshDepthWrite_      = wantDepthWrite;
+            lastMeshTwoSided_        = wantTwoSided;
+            lastMeshTransparent_     = wantTransparent;
+            hasLastPushConstants_    = false;
+            hasLastFurPushConstants_ = false;
         }
         PushConstants   push;
         push.model[0]             = 1.0f;
@@ -1413,7 +1600,6 @@ void VulkanBackend::drawMeshInstances(
         push.cloth[1]             = material.doubleSided ? 1.0f : 0.0f;
         push.cloth[2]             = glm::clamp(material.alphaCutoff, 0.0f, 1.0f);
         push.cloth[3]             = glm::clamp(material.opacity, 0.0f, 1.0f);
-    push.cloth[3]             = glm::clamp(material.opacity, 0.0f, 1.0f);
         if (!hasLastPushConstants_ || std::memcmp(&push, &lastPushConstants_, sizeof(PushConstants)) != 0)
         {
             vkCmdPushConstants(command,
@@ -1572,6 +1758,17 @@ void VulkanBackend::drawFur(MeshHandle mesh, const float *modelMatrix, const Mes
     if (lastBoundPipeline_ != BoundPipeline::Fur)
     {
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->furPipeline());
+        // Set 0 (frame uniform) follows the pipeline switch - the overlay
+        // layout owned it for its pass and the mesh layout's set 0 is a
+        // different set object.
+        vkCmdBindDescriptorSets(command,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_->furPipelineLayout(),
+            0,
+            1,
+            resources_->frameUniformSetPtr(frames_->currentFrame()),
+            0,
+            nullptr);
         lastBoundPipeline_    = BoundPipeline::Fur;
         hasLastPushConstants_ = false; // different push layout; re-push on the next mesh draw
     }
@@ -1681,6 +1878,16 @@ void VulkanBackend::drawFurInstances(MeshHandle mesh, const float *modelMatrices
         if (lastBoundPipeline_ != BoundPipeline::Fur)
         {
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->furPipeline());
+            // See drawFur's switch block: set 0 (frame uniform) follows the
+            // pipeline switch.
+            vkCmdBindDescriptorSets(command,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline_->furPipelineLayout(),
+                0,
+                1,
+                resources_->frameUniformSetPtr(frames_->currentFrame()),
+                0,
+                nullptr);
             lastBoundPipeline_    = BoundPipeline::Fur;
             hasLastPushConstants_ = false;
         }
@@ -1745,7 +1952,8 @@ void VulkanBackend::drawFurInstances(MeshHandle mesh, const float *modelMatrices
                     0,
                     sizeof(FurPushConstants),
                     &push);
-                lastFurPushConstants_ = push;
+                lastFurPushConstants_    = push;
+                hasLastFurPushConstants_ = true;
             }
             vkCmdDrawIndexed(command, vulkanMesh->indexCount, visibleCount, 0, 0, 0);
             const std::uint64_t triangles
@@ -1921,12 +2129,22 @@ bool VulkanBackend::ensureDynamicMeshStaging(std::uint32_t frameIndex, VkDeviceS
         return false;
     }
     DynamicMeshStaging &staging = dynamicMeshStaging_[frameIndex];
-    if (staging.capacity >= bytes && staging.buffer != VK_NULL_HANDLE && staging.mapping != nullptr)
+    // The incoming update lands at the cursor, so the buffer must hold the
+    // bytes already streamed this frame PLUS the new ones - capacity against
+    // the update size alone would pass while the memcpy below runs past the
+    // mapping on every update after the first.
+    const VkDeviceSize maximumSafe = std::numeric_limits<VkDeviceSize>::max() / 2;
+    if (staging.cursor > maximumSafe || bytes > maximumSafe - staging.cursor)
+    {
+        return false;
+    }
+    const VkDeviceSize needed = staging.cursor + bytes;
+    if (staging.capacity >= needed && staging.buffer != VK_NULL_HANDLE && staging.mapping != nullptr)
     {
         return true;
     }
     VkDeviceSize newCapacity = std::max<VkDeviceSize>(64 * 1024, staging.capacity);
-    while (newCapacity < bytes)
+    while (newCapacity < needed)
     {
         newCapacity *= 2;
     }
@@ -2022,10 +2240,16 @@ void VulkanBackend::destroyDynamicMeshStaging() noexcept
 
 // Streams one mesh's new vertex data through this frame slot's staging
 // buffer and records the device copy plus the transfer -> vertex-input
-// barrier into the frame's command buffer. Recording inside the consuming
-// frame keeps the copy, the barrier, and every draw that binds the mesh in
-// one submission ordered on the graphics queue - no cross-queue
-// synchronization and no pipeline drain on the update path.
+// barrier into the frame's command buffer, so every later draw in the same
+// submission that binds the mesh sees the new data. Recording inside the
+// consuming frame keeps the copy, the barrier, and the draws ordered on the
+// graphics queue - no cross-queue synchronization and no pipeline drain on
+// the update path.
+// Transfer commands (vkCmdCopyBuffer) are illegal INSIDE a render pass
+// instance - a legacy render pass or a dynamic rendering scope alike - so
+// the recording suspends the drawing scope first and resumes it with LOAD
+// operations afterwards; the frame's already-drawn contents survive, and
+// every binding cache resets at the resume as though a new frame began.
 bool VulkanBackend::recordDynamicMeshUpdate(
     MeshHandle mesh, const void *vertices, std::uint32_t vertexCount, RenderError *error)
 {
@@ -2057,6 +2281,14 @@ bool VulkanBackend::recordDynamicMeshUpdate(
         return false;
     }
     VkCommandBuffer command = frames_->commandBuffer();
+    // The drawing scope must be suspended while the transfer records; a
+    // flush that runs before beginFrame opens the scope records the copy
+    // ahead of the pass instead, where no suspension is needed.
+    const bool scopeWasActive = drawingScopeActive_;
+    if (scopeWasActive)
+    {
+        suspendDrawingScope(command);
+    }
     const VkBufferCopy copy{staging.cursor, 0, vertexBytes};
     vkCmdCopyBuffer(command, staging.buffer, destination, 1, &copy);
     const VkBufferMemoryBarrier toVertexRead{
@@ -2081,8 +2313,137 @@ bool VulkanBackend::recordDynamicMeshUpdate(
         0,
         nullptr);
     staging.cursor += vertexBytes;
+    if (scopeWasActive)
+    {
+        resumeDrawingScope(command);
+    }
     reportError(error, RenderError::None);
     return true;
+}
+
+// Ends the frame's active drawing scope so transfer work can record: the
+// vkCmdEndRenderPass / vkCmdEndRendering pair endFrame itself uses (the
+// legacy instance leaves the swapchain image in PRESENT_SRC_KHR per its
+// finalLayout, the dynamic scope keeps COLOR_ATTACHMENT_OPTIMAL).
+void VulkanBackend::suspendDrawingScope(VkCommandBuffer command)
+{
+    if (pipeline_->dynamicRenderingEnabled())
+    {
+        vkCmdEndRendering(command);
+    }
+    else
+    {
+        vkCmdEndRenderPass(command);
+    }
+    drawingScopeActive_ = false;
+}
+
+// Re-begins the drawing scope after a suspension with LOAD operations so the
+// frame's already-drawn contents survive, then rebinds the drawing state
+// exactly as beginFrame does. The legacy path uses the render-pass resume
+// twin (compatible attachments, so the framebuffers rebind); the dynamic
+// path redeclares the same inline attachments with LOAD. Neither path may
+// assume any command-buffer state survived the scope boundary, so the mesh
+// pipeline, viewport, scissor, set-0 descriptors rebind and every binding
+// cache resets to its beginFrame value.
+void VulkanBackend::resumeDrawingScope(VkCommandBuffer command)
+{
+    const std::uint32_t frameIndex = frames_->currentFrame();
+    if (pipeline_->dynamicRenderingEnabled())
+    {
+        // Same attachments the frame's begin declared (the MSAA color
+        // attachment with its resolve target, the slot's depth attachment)
+        // with LOAD operations: the drawn contents survive, and the
+        // end-of-frame present transition in endFrame is unchanged.
+        VkRenderingAttachmentInfo colorAtt{
+            .sType              = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .pNext              = nullptr,
+            .imageView          = swapchain_->colorView(frameIndex, currentImageIndex_),
+            .imageLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .resolveMode        = VK_RESOLVE_MODE_NONE,
+            .resolveImageView   = VK_NULL_HANDLE,
+            .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .loadOp             = VK_ATTACHMENT_LOAD_OP_LOAD,
+            .storeOp            = VK_ATTACHMENT_STORE_OP_STORE,
+            .clearValue         = {},
+        };
+        if (pipeline_->sampleCount() != VK_SAMPLE_COUNT_1_BIT)
+        {
+            colorAtt.resolveMode        = VK_RESOLVE_MODE_AVERAGE_BIT;
+            colorAtt.resolveImageView   = swapchain_->resolveView(currentImageIndex_);
+            colorAtt.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            colorAtt.storeOp            = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        }
+        VkRenderingAttachmentInfo depthAtt{
+            .sType              = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .pNext              = nullptr,
+            .imageView          = swapchain_->depthView(frameIndex),
+            .imageLayout        = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            .resolveMode        = VK_RESOLVE_MODE_NONE,
+            .resolveImageView   = VK_NULL_HANDLE,
+            .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .loadOp             = VK_ATTACHMENT_LOAD_OP_LOAD,
+            .storeOp            = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .clearValue         = {},
+        };
+        const VkRenderingInfo ri{
+            .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .pNext                = nullptr,
+            .flags                = 0,
+            .renderArea           = {{0, 0}, {swapchain_->extent().width, swapchain_->extent().height}},
+            .layerCount           = 1,
+            .viewMask             = 0,
+            .colorAttachmentCount = 1,
+            .pColorAttachments    = &colorAtt,
+            .pDepthAttachment     = &depthAtt,
+            .pStencilAttachment   = nullptr,
+        };
+        vkCmdBeginRendering(command, &ri);
+    }
+    else
+    {
+        const VkRenderPassBeginInfo resumeBegin{
+            .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .pNext           = nullptr,
+            .renderPass      = pipeline_->renderPassResume(),
+            .framebuffer     = swapchain_->framebuffer(frameIndex, currentImageIndex_),
+            .renderArea      = {{0, 0}, {swapchain_->extent().width, swapchain_->extent().height}},
+            .clearValueCount = 0, // LOAD operations: nothing to clear
+            .pClearValues    = nullptr,
+        };
+        vkCmdBeginRenderPass(command, &resumeBegin, VK_SUBPASS_CONTENTS_INLINE);
+    }
+
+    // The state rebind mirrors beginFrame's post-scope block verbatim.
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->pipeline());
+    vkCmdBindDescriptorSets(command,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        pipeline_->pipelineLayout(),
+        0,
+        1,
+        resources_->frameUniformSetPtr(frames_->currentFrame()),
+        0,
+        nullptr);
+    std::uint32_t width  = viewportWidth_ != 0 ? viewportWidth_ : swapchain_->extent().width;
+    std::uint32_t height = viewportHeight_ != 0 ? viewportHeight_ : swapchain_->extent().height;
+    width                = std::min(width, swapchain_->extent().width);
+    height               = std::min(height, swapchain_->extent().height);
+    const VkViewport viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
+    const VkRect2D   scissor{{0, 0}, {width, height}};
+    vkCmdSetViewport(command, 0, 1, &viewport);
+    vkCmdSetScissor(command, 0, 1, &scissor);
+    drawingScopeActive_ = true;
+
+    lastBoundPipeline_          = BoundPipeline::Mesh;
+    lastMeshDepthWrite_         = true;
+    lastMeshTwoSided_           = false;
+    lastMeshTransparent_        = false;
+    hasLastPushConstants_       = false;
+    hasLastFurPushConstants_    = false;
+    lastBoundMesh_              = invalidMesh;
+    lastBoundMaterialSet_       = VK_NULL_HANDLE;
+    lastBoundInstanceOffset_    = 0;
+    hasLastBoundInstanceBuffer_ = false;
 }
 
 void VulkanBackend::flushPendingMeshUpdates()
@@ -2144,7 +2505,8 @@ bool VulkanBackend::ensureOverlayBuffers(std::uint32_t frameIndex, VkDeviceSize 
                           VkBuffer          &buffer,
                           VmaAllocation     &allocation,
                           void             *&mapping,
-                          VkDeviceSize      &capacity)
+                          VkDeviceSize      &capacity,
+                          std::vector<OverlayBuffer::RetiredBuffer> &retiredOut)
     {
         if (required <= capacity && buffer != VK_NULL_HANDLE && mapping != nullptr)
             return true;
@@ -2174,7 +2536,21 @@ bool VulkanBackend::ensureOverlayBuffers(std::uint32_t frameIndex, VkDeviceSize 
         if (mapping != nullptr)
             device_->unmapAllocation(allocation);
         if (buffer != VK_NULL_HANDLE)
-            device_->destroyBuffer(buffer, allocation);
+        {
+            // The replaced buffer must survive until the slot's next
+            // beginFrame: earlier drawOverlay calls this frame already
+            // recorded commands that bind it, and destroying it now would
+            // leave those commands referencing freed memory. A retired-list
+            // push failure (bad_alloc) leaks the buffer to teardown instead
+            // - strictly safer than a use-after-destroy.
+            try
+            {
+                retiredOut.push_back({buffer, allocation});
+            }
+            catch (const std::bad_alloc &)
+            {
+            }
+        }
         buffer     = newBuffer;
         allocation = newAllocation;
         mapping    = newMapping;
@@ -2187,13 +2563,15 @@ bool VulkanBackend::ensureOverlayBuffers(std::uint32_t frameIndex, VkDeviceSize 
                buffers.vertexBuffer,
                buffers.vertexAllocation,
                buffers.vertexMapping,
-               buffers.vertexCapacity)
+               buffers.vertexCapacity,
+               buffers.retired)
         && grow(indexBytes,
             VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
             buffers.indexBuffer,
             buffers.indexAllocation,
             buffers.indexMapping,
-            buffers.indexCapacity);
+            buffers.indexCapacity,
+            buffers.retired);
 }
 
 void VulkanBackend::destroyOverlayBuffers() noexcept
@@ -2210,9 +2588,29 @@ void VulkanBackend::destroyOverlayBuffers() noexcept
             device_->unmapAllocation(buffers.indexAllocation);
         if (buffers.indexBuffer != VK_NULL_HANDLE)
             device_->destroyBuffer(buffers.indexBuffer, buffers.indexAllocation);
+        for (const OverlayBuffer::RetiredBuffer &retired : buffers.retired)
+        {
+            device_->destroyBuffer(retired.buffer, retired.allocation);
+        }
+        buffers.retired.clear();
         buffers = {};
     }
     overlayBuffers_.clear();
+}
+
+// Frees the overlay scratch buffers a mid-frame growth step retired on this
+// slot. Called from beginFrame after the slot's fence wait, so every command
+// that still referenced the replaced buffers has provably completed.
+void VulkanBackend::retireOverlayBuffers(std::uint32_t frameIndex)
+{
+    if (device_ == nullptr || frameIndex >= overlayBuffers_.size())
+        return;
+    OverlayBuffer &buffers = overlayBuffers_[frameIndex];
+    for (const OverlayBuffer::RetiredBuffer &retired : buffers.retired)
+    {
+        device_->destroyBuffer(retired.buffer, retired.allocation);
+    }
+    buffers.retired.clear();
 }
 
 // Overlay pass: copies the vertices/indices into this frame slot's scratch
@@ -2253,6 +2651,20 @@ void VulkanBackend::drawOverlay(const OverlayDrawData &data)
 
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->overlayPipeline());
     lastBoundPipeline_ = BoundPipeline::Overlay;
+    // The overlay pass owns set 0 (its texture sets bind there through the
+    // overlay layout), vertex binding 0 and the index buffer for its own
+    // draws, and the first 16 bytes of the shared push-constant storage
+    // (its display transform). None of the mesh/fur bind caches may survive
+    // that: a later mesh draw would skip rebinding on a cache hit and read
+    // the overlay's descriptors, vertices and push constants instead. The
+    // pipeline-switch blocks in drawMesh/drawFur rebind set 0 with the
+    // pipeline; these invalidations make sure every other cached binding
+    // rebinds too.
+    lastBoundMesh_              = invalidMesh;
+    lastBoundMaterialSet_       = VK_NULL_HANDLE;
+    hasLastBoundInstanceBuffer_ = false;
+    hasLastPushConstants_       = false;
+    hasLastFurPushConstants_    = false;
     const float scale[2]     = {2.0f / data.displaySize[0], 2.0f / data.displaySize[1]};
     const float translate[2] = {-1.0f - data.displayPosition[0] * scale[0], -1.0f - data.displayPosition[1] * scale[1]};
     const float pushConstants[4] = {scale[0], scale[1], translate[0], translate[1]};
@@ -2291,6 +2703,7 @@ void VulkanBackend::drawOverlay(const OverlayDrawData &data)
         }
         if (draw.elementCount == 0 || draw.indexOffset > data.indexCount
             || draw.elementCount > data.indexCount - draw.indexOffset
+            || draw.vertexOffset > data.vertexCount
             || draw.vertexOffset > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()))
         {
             continue;
@@ -2338,6 +2751,17 @@ void VulkanBackend::drawOverlay(const OverlayDrawData &data)
         vkCmdDrawIndexed(
             command, draw.elementCount, 1, draw.indexOffset, static_cast<std::int32_t>(draw.vertexOffset), 0);
     }
+
+    // The pass leaves its LAST command's clip-rectangle scissor bound; a
+    // later mesh draw this frame would render clipped to that stale
+    // rectangle (its pipeline-switch block re-emits the scissor, but a draw
+    // whose variant already matches the cache skips that block). Restore
+    // the full drawing surface so the command buffer leaves the overlay pass
+    // with the frame-neutral scissor.
+    {
+        const VkRect2D scissor{{0, 0}, {width, height}};
+        vkCmdSetScissor(command, 0, 1, &scissor);
+    }
 }
 
 // Finishes the render pass, records the optional PPM readback copy, ends
@@ -2362,6 +2786,7 @@ void VulkanBackend::endFrame()
     {
         vkCmdEndRenderPass(command);
     }
+    drawingScopeActive_ = false;
 
     bool exportCopyRecorded = false;
     std::uint32_t exportWidth = 0;
@@ -2481,6 +2906,13 @@ void VulkanBackend::endFrame()
     {
         std::fprintf(
             stderr, "renderer module: missing presentation semaphore for swapchain image %u\n", currentImageIndex_);
+        // The frame neither submitted nor will present: the acquire-side
+        // semaphore is left signaled with no waiter and the slot's fence was
+        // reset by beginFrame with no submission to signal it. Abandon the
+        // acquired image exactly like the failed-submit path, or the slot
+        // wedges (every later beginFrame on it times out and skips forever)
+        // and the next acquire on the still-signaled semaphore is illegal.
+        abandonAcquiredImage(true);
         frameActive_ = false;
         swapchain_->markDirty();
         return;
@@ -2527,6 +2959,10 @@ void VulkanBackend::endFrame()
     if (submitResult != VK_SUCCESS)
     {
         std::fprintf(stderr, "renderer module: vkQueueSubmit failed\n");
+        // The failed submit neither consumed the acquire semaphore nor
+        // signaled the slot fence: replace the former and re-arm the latter
+        // so the next beginFrame on this slot stays usable.
+        abandonAcquiredImage(true);
         frameActive_ = false;
         return;
     }
@@ -2571,12 +3007,33 @@ bool VulkanBackend::createMesh(MeshHandle id, const MeshDescription &description
     return resources_->createMesh(id, description, error);
 }
 
+// A destroy issued between frames (frameActive_ false, the common time -
+// the module forwards application calls straight through) must queue on the
+// slot that was just submitted: endFrame already rotated the scheduler, so
+// deferredDestroys_[currentFrame] names the NEXT slot, whose beginFrame
+// fence wait only covers the submission from framesInFlight frames ago -
+// draining there could free buffers the just-submitted frame still uses.
+// Queued on the submitted slot instead, the entry drains at the beginFrame
+// that provably waits that submission's fence. Mid-frame destroys keep the
+// recording slot: the frame being recorded is the last that can reference
+// the resource, and its own submission signals that slot's fence.
+std::uint32_t VulkanBackend::deferredDestroySlot() const
+{
+    const std::uint32_t slots = static_cast<std::uint32_t>(deferredDestroys_.size());
+    const std::uint32_t current = frames_ != nullptr ? frames_->currentFrame() : 0u;
+    if (slots == 0)
+    {
+        return 0;
+    }
+    return frameActive_ ? current : (current + slots - 1u) % slots;
+}
+
 void VulkanBackend::destroyMesh(MeshHandle mesh)
 {
     // Defer while a frame is recorded so the GPU stops using the buffers
     // first; the else branch waits for the device before immediate teardown.
     if (mesh != invalidMesh && !deferredDestroys_.empty())
-        deferredDestroys_[frames_->currentFrame()].push_back({mesh, invalidTexture});
+        deferredDestroys_[deferredDestroySlot()].push_back({mesh, invalidTexture});
     else
     {
         waitForDeviceQuiet();
@@ -2592,7 +3049,7 @@ bool VulkanBackend::createTexture(TextureHandle id, const TextureDescription &de
 void VulkanBackend::destroyTexture(TextureHandle texture)
 {
     if (texture != invalidTexture && !deferredDestroys_.empty())
-        deferredDestroys_[frames_->currentFrame()].push_back({invalidMesh, texture});
+        deferredDestroys_[deferredDestroySlot()].push_back({invalidMesh, texture});
     else
     {
         waitForDeviceQuiet();
@@ -2607,6 +3064,19 @@ void VulkanBackend::drainDeferredDestroys(std::uint32_t frameIndex)
     if (frameIndex >= deferredDestroys_.size())
         return;
     auto &queue = deferredDestroys_[frameIndex];
+    if (queue.empty())
+    {
+        return;
+    }
+    // Upload copies queued after the drained slot's submission can still be
+    // writing these buffers: the slot's fence only proves its own submission
+    // retired, while the async upload queue tracks its copies on separate
+    // fences (a resource created and destroyed without ever being drawn
+    // otherwise frees its destination mid-copy). Retire every pending upload
+    // before the destinations are freed; a mesh that was drawn at least once
+    // has its last draw's submission ordered after the upload, so the wait
+    // is a no-op for it in practice.
+    device_->waitForUploads();
     for (const auto &entry : queue)
     {
         if (entry.mesh != invalidMesh)

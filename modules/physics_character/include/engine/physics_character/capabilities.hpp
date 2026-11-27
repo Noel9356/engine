@@ -317,10 +317,9 @@ struct CharacterCapability
     bool (*setCharacterJointGains)(void *self, CharacterHandle character, std::uint32_t linkIndex, double stiffness,
         double damping, double maximumTorque);
 
-    // Per-fixed-update control pass: pushes the pose targets and drive
-    // strengths into the articulated drives, applies the pose assist torque
-    // pairs on the enabled ball-socket targets (the swing degrees of freedom
-    // the twist drives do not cover), and applies the upright assist torque
+    // Per-fixed-update control pass: computes the pose error torques directly on the
+    // enabled joint targets (both hinge and ball-socket kinds), applies
+    // them as equal-and-opposite torque pairs, and applies the upright assist torque
     // to the torso body (Kinematic and Blended modes only).
     bool (*updateCharacter)(void *self, CharacterHandle character, double fixedDeltaSeconds);
 

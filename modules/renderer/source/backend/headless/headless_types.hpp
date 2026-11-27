@@ -46,6 +46,15 @@ struct HeadlessMesh
     float                      boundsRadius = 0.0f;
     bool                       boundsValid  = false;
 
+    // Bumped by every updateMeshVertices call: consumers that key cached
+    // state on the mesh's GEOMETRY (the sun/sky shadow-map rebuild hash -
+    // the transform pair alone cannot see a deforming mesh) mix this value
+    // into their keys so a static transform under a static camera still
+    // rebuilds when the vertices change. Creation stamps 0; the handle is
+    // never reused for different content (re-creation is rejected), so a
+    // revision alone identifies the geometry generation.
+    std::uint64_t              geometryRevision = 0;
+
     std::vector<std::vector<std::uint32_t>> lodIndices;
 
     // Memo for the back-face winding vote (see HeadlessBackend's
@@ -172,10 +181,16 @@ struct HeadlessTexture
         // (full minification onto the top level, magnification onto the base
         // level) then resolve with two multiplies and a compare, and the
         // sqrt/log2 pair only runs inside the blend band between them.
-        const float footprintX2 = uvDx.x * uvDx.x * static_cast<float>(width * width)
-            + uvDx.y * uvDx.y * static_cast<float>(height * height);
-        const float footprintY2 = uvDy.x * uvDy.x * static_cast<float>(width * width)
-            + uvDy.y * uvDy.y * static_cast<float>(height * height);
+        // The extents are cast to float BEFORE squaring: uint32 extents
+        // square in 32 bits and wrap to zero at 65536 (the validation layer
+        // caps only against address-space overflow, not against 64k), which
+        // silently pinned every such texture to the base mip level. For
+        // every width whose square fits uint32 the float results are
+        // identical to the old expression.
+        const float footprintX2 = uvDx.x * uvDx.x * (static_cast<float>(width) * static_cast<float>(width))
+            + uvDx.y * uvDx.y * (static_cast<float>(height) * static_cast<float>(height));
+        const float footprintY2 = uvDy.x * uvDy.x * (static_cast<float>(width) * static_cast<float>(width))
+            + uvDy.y * uvDy.y * (static_cast<float>(height) * static_cast<float>(height));
         const float footprintSquared = std::max(footprintX2, footprintY2);
         const float maxLevel         = static_cast<float>(mipChain.size());
         const float topFootprint     = std::exp2(maxLevel); // footprint that selects the top level

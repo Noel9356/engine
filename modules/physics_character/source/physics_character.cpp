@@ -506,7 +506,13 @@ private:
                     axisLocal.z * std::sin(halfAngle),
                     std::cos(halfAngle)};
                 const math::Quaternion targetRotation  = math::normalize(assemblyRotation * targetTwist);
-                const math::Quaternion frameError      = math::conjugate(targetRotation) * relativeRotation;
+                // The residual carries the (target -> current) sense when it
+                // is conjugated from the relative rotation; conjugating the
+                // relative rotation instead leaves the error holding
+                // current-minus-target, which turns the +stiffness term into
+                // an anti-spring (the articulated drive measures
+                // target-minus-current about the same axis convention).
+                const math::Quaternion frameError      = math::conjugate(relativeRotation) * targetRotation;
                 const math::Vec3 omegaRelative         = childState.angularVelocity - parentState.angularVelocity;
                 // Gain bounds from the child limb's inertia about the joint
                 // axis: a torque PD is only discretely stable when the
@@ -533,7 +539,16 @@ private:
                         // every interval steps.
                         const double effectiveStep = fixedDeltaSeconds * driveTimeScale;
                         damping = std::min(damping, 1.6 * limbInertia / effectiveStep);
-                        stiffness = std::min(stiffness, damping * damping / (4.0 * limbInertia));
+                        // A damped drive caps stiffness at the critical
+                        // damping relation (c^2 / 4I, response without
+                        // overshoot). An UNDAMPED drive (damping == 0 is
+                        // explicitly legal) must instead cap at the undamped
+                        // semi-implicit Euler stability bound 4I/h^2 - the
+                        // critical-damping form would compute 0 and silently
+                        // switch the whole pose target off.
+                        stiffness = std::min(stiffness,
+                            damping > 0.0 ? damping * damping / (4.0 * limbInertia)
+                                          : 3.2 * limbInertia / (effectiveStep * effectiveStep));
                     }
                 }
                 math::Vec3 torque;
@@ -636,6 +651,10 @@ private:
             chain.restOffsets[bone] = {description->restOffsets[bone * 3], description->restOffsets[bone * 3 + 1],
                 description->restOffsets[bone * 3 + 2]};
         }
+        // The record owns the offsets; the stored description keeps no view
+        // of the caller's buffer (the foot-planter record applies the same
+        // rule to its copied ignore list).
+        chain.description.restOffsets = nullptr;
         chain.bones.assign(description->boneCount, JiggleBoneState{});
         chain.worldRotations.assign(description->boneCount, math::Quaternion{0.0, 0.0, 0.0, 1.0});
         chain.cadence.phase = static_cast<std::uint32_t>(registrationOrdinal_++);
@@ -674,6 +693,13 @@ private:
         }
         if (!finiteArray(rootVelocity, 3) || !std::isfinite(root->position.x) || !std::isfinite(root->position.y)
             || !std::isfinite(root->position.z))
+        {
+            return false;
+        }
+        // The rotation feeds normalize + every bone frame transform; a
+        // non-finite quaternion would propagate NaN into the reported
+        // bone rotations.
+        if (!math::isFinite(root->rotation))
         {
             return false;
         }
@@ -740,7 +766,12 @@ private:
             const double damping   = std::min(chain->description.damping, kSpringDampingStabilityFactor / stepDeltaSeconds);
             for (std::uint32_t axis = 0; axis < 3; ++axis)
             {
-                state.angularVelocity[axis] += (-stiffness * math::component(excitation, axis)
+                // The excitation is the physical tip torque (r x F), so the
+                // spring settles where the offset balances it: the bone bends
+                // along the applied torque and the spring fights further
+                // bending (a chain lagging behind an accelerating root, a
+                // horizontal bone sagging under gravity).
+                state.angularVelocity[axis] += (stiffness * math::component(excitation, axis)
                                                     - damping * state.angularVelocity[axis]
                                                     - stiffness * state.offsetVector[axis])
                                                * stepDeltaSeconds;
@@ -838,6 +869,12 @@ private:
             || description->footRadius <= 0.0 || description->maxStepHeight < 0.0 || description->strideThreshold <= 0.0
             || description->rayCastUp <= 0.0 || description->leadTime < 0.0
             || !std::isfinite(description->legUpperLength) || !std::isfinite(description->legLowerLength)
+            // NaN bypasses every `<= 0.0` guard above, so the remaining
+            // scalars need explicit finiteness checks too (they feed the
+            // ray origin/length and every replant condition directly).
+            || !std::isfinite(description->footRadius) || !std::isfinite(description->maxStepHeight)
+            || !std::isfinite(description->strideThreshold) || !std::isfinite(description->rayCastUp)
+            || !std::isfinite(description->leadTime)
             || !std::isfinite(description->hipAnchor[0]) || !std::isfinite(description->hipAnchor[1])
             || !std::isfinite(description->hipAnchor[2]) || !finiteArray(description->footOffsets[0], 3)
             || !finiteArray(description->footOffsets[1], 3))
@@ -846,6 +883,14 @@ private:
             return invalidFootPlanter;
         }
         if (description->legUpperLength + description->legLowerLength <= description->footRadius)
+        {
+            setError(error, CharacterError::InvalidDescription);
+            return invalidFootPlanter;
+        }
+        // The IK clamps the hip-foot distance into (1e-6, reach - 1e-6);
+        // a reach that small would invert std::clamp's bounds (lo > hi,
+        // undefined behaviour), so the bones must span a working reach.
+        if (description->legUpperLength + description->legLowerLength <= 2.0e-5)
         {
             setError(error, CharacterError::InvalidDescription);
             return invalidFootPlanter;
@@ -909,8 +954,17 @@ private:
         planterIndexByHandle_.erase(iterator);
         if (index + 1 != planters_.size())
         {
-            planters_[index]                                     = planters_.back();
-            planterIndexByHandle_[planters_[index].handle]       = index;
+            planters_[index]                               = planters_.back();
+            // The copy-assignment carried the BACK record's
+            // description.ignoredBodies view over this record's description,
+            // and pop_back below destroys the back record - together with
+            // the vector allocation that view points into. Repoint the
+            // description at the surviving record's OWN copied list, exactly
+            // the fixup createFootPlanter applies when it first interns one.
+            planters_[index].description.ignoredBodies = planters_[index].ignoredBodies.empty()
+                ? nullptr
+                : planters_[index].ignoredBodies.data();
+            planterIndexByHandle_[planters_[index].handle] = index;
         }
         planters_.pop_back();
         statistics_.footPlanterCount = static_cast<std::uint32_t>(planters_.size());
@@ -926,6 +980,14 @@ private:
             return false;
         }
         if (!finiteArray(rootVelocity, 3))
+        {
+            return false;
+        }
+        // The other update paths reject a non-finite root pose; the foot
+        // planter must too (its hip world position and every ray probe
+        // derive from this transform).
+        if (!std::isfinite(root->position.x) || !std::isfinite(root->position.y)
+            || !std::isfinite(root->position.z) || !math::isFinite(root->rotation))
         {
             return false;
         }
@@ -1022,6 +1084,8 @@ private:
             const math::Vec3 footPoint = runtime.plantPosition + math::Vec3{0.0, description.footRadius, 0.0};
             const math::Vec3 hipToFoot = footPoint - hipWorld;
             const double distance      = math::length(hipToFoot);
+            // reach is validated > 2e-5 at creation, so the clamp bounds
+            // can never invert (lo > hi would be undefined behaviour).
             const double clamped       = std::clamp(distance, 1.0e-6, legReach - 1.0e-6);
             const double upperLength   = description.legUpperLength;
             const double lowerLength   = description.legLowerLength;
@@ -1124,7 +1188,11 @@ private:
             setError(error, CharacterError::InvalidDescription);
             return invalidHandPlanter;
         }
-        if (description->armUpperLength + description->armLowerLength <= 0.0)
+        // The IK clamps the shoulder-target distance into (1e-6, reach -
+        // 1e-6); a reach that small would invert std::clamp's bounds (lo >
+        // hi, undefined behaviour), so the bones must span a working reach
+        // (both are positive already, so only the sum needs the bound).
+        if (description->armUpperLength + description->armLowerLength <= 2.0e-5)
         {
             setError(error, CharacterError::InvalidDescription);
             return invalidHandPlanter;
@@ -1189,7 +1257,8 @@ private:
         {
             return false;
         }
-        if (!std::isfinite(root->position.x) || !std::isfinite(root->position.y) || !std::isfinite(root->position.z))
+        if (!std::isfinite(root->position.x) || !std::isfinite(root->position.y) || !std::isfinite(root->position.z)
+            || !math::isFinite(root->rotation))
         {
             return false;
         }

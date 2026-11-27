@@ -217,10 +217,16 @@ private:
         for (std::uint32_t wave = 0; wave < description.waveCount; ++wave)
         {
             const WaveDescription &candidate = description.waves[wave];
+            // Wavelength keeps a positive lower bound so the wave number
+            // 2*pi/wavelength and its omega sqrt(g*k) stay finite (a
+            // denormal wavelength passes `> 0.0` but overflows both); the
+            // amplitude upper bound keeps every Gerstner displacement and
+            // the surface normal finite. Both bounds mirror the ones the
+            // ripple configuration keys already enforce.
             if (!std::isfinite(candidate.directionX) || !std::isfinite(candidate.directionZ)
-                || !std::isfinite(candidate.wavelength) || candidate.wavelength <= 0.0
+                || !std::isfinite(candidate.wavelength) || candidate.wavelength <= 1.0e-4
                 || !std::isfinite(candidate.amplitude) || candidate.amplitude < 0.0
-                || !std::isfinite(candidate.steepness))
+                || candidate.amplitude > 1.0e6 || !std::isfinite(candidate.steepness))
             {
                 return false;
             }
@@ -404,10 +410,12 @@ private:
             setError(error, WaterError::InvalidHandle);
             return invalidOcean;
         }
-        ocean.gravityMagnitude = std::abs(gravity[1]) > 1.0e-6 ? std::abs(gravity[1])
-                                                               : std::sqrt(gravity[0] * gravity[0]
-                                                                           + gravity[1] * gravity[1]
-                                                                           + gravity[2] * gravity[2]);
+        // The full vector is captured (the buoyancy pass pushes -rho * V * g,
+        // so a tilted field pushes against its own direction) and the scalar
+        // magnitude |g| is precomputed from it; the capture itself doubles as
+        // the world-handle validation above.
+        ocean.gravity         = math::Vec3{gravity[0], gravity[1], gravity[2]};
+        ocean.gravityMagnitude = math::length(ocean.gravity);
         // Simulation LOD: the stagger phase derives from the registration
         // ordinal, so oceans sharing an interval spread their passes across
         // steps.
@@ -462,7 +470,8 @@ private:
         OceanHandle handle, double x, double z, double timeSeconds, double *outHeight, double outNormal[3])
     {
         OceanRecord *ocean = findOcean(handle);
-        if (ocean == nullptr || outHeight == nullptr || outNormal == nullptr || !std::isfinite(timeSeconds))
+        if (ocean == nullptr || outHeight == nullptr || outNormal == nullptr || !std::isfinite(timeSeconds)
+            || !std::isfinite(x) || !std::isfinite(z))
         {
             return false;
         }
@@ -554,6 +563,73 @@ private:
         return static_cast<double>(below) / static_cast<double>(samplePoints_.size());
     }
 
+    // True when a batched state read is exactly the provider's documented
+    // default-constructed entry - the signature of a handle the rigid world
+    // no longer knows. A live body resting exactly at the origin with zero
+    // velocity and identity rotation produces the same bytes, so callers
+    // confirm suspects with the single-body probe before pruning.
+    bool stateIsDefault(const engine::physics_rigid::BodyState &state)
+    {
+        return state.transform.position.x == 0.0 && state.transform.position.y == 0.0
+            && state.transform.position.z == 0.0 && state.transform.rotation.x == 0.0
+            && state.transform.rotation.y == 0.0 && state.transform.rotation.z == 0.0
+            && state.transform.rotation.w == 1.0 && state.linearVelocity.x == 0.0
+            && state.linearVelocity.y == 0.0 && state.linearVelocity.z == 0.0 && state.angularVelocity.x == 0.0
+            && state.angularVelocity.y == 0.0 && state.angularVelocity.z == 0.0 && state.awake;
+    }
+
+    // Frees registrations whose body died in the rigid world. The batched
+    // copyBodyStates fills results IN PLACE (the documented contract), so
+    // the resolved COUNT alone cannot say WHICH entries died - assuming the
+    // first `resolved` entries are the live ones (front-packed) erases live
+    // tail bodies and keeps dead heads whenever a dead handle is not at the
+    // tail. Instead: entries reading exactly default are suspects, and each
+    // suspect is confirmed with the single-body probe (which returns false
+    // for unknown handles) before its registration is freed.
+    void pruneDeadRegistrations(OceanRecord &ocean)
+    {
+        if (rigid_ == nullptr || ocean.registeredBodies.empty())
+        {
+            return;
+        }
+        wakeStatesScratch_.resize(ocean.registeredBodies.size());
+        const std::uint32_t resolved = rigid_->copyBodyStates(rigid_->self, ocean.world,
+            ocean.registeredBodies.data(), static_cast<std::uint32_t>(ocean.registeredBodies.size()),
+            wakeStatesScratch_.data());
+        if (resolved == 0u)
+        {
+            // The world itself is gone (the batch resolved NOTHING): every
+            // registration is dead, but the caller keeps the list for a world
+            // that may come back - free nothing and let the callers'
+            // short-count guards skip the pass. A PARTIAL count (some entries
+            // resolved, others default-filled) is exactly the
+            // some-bodies-died case the suspect/probe loop below prunes; the
+            // old `resolved < size` gate here made that loop unreachable
+            // whenever it actually had work, so dead registrations accumulated
+            // forever and every dependent pass went dormant.
+            return;
+        }
+        for (std::size_t index = ocean.registeredBodies.size(); index-- > 0;)
+        {
+            if (!stateIsDefault(wakeStatesScratch_[index]))
+            {
+                continue; // definitively a live body's state
+            }
+            engine::physics_rigid::BodyState probe;
+            if (rigid_->copyBodyState(rigid_->self, ocean.world, ocean.registeredBodies[index], &probe))
+            {
+                continue; // live body that just happens to be at rest at the origin
+            }
+            ocean.registeredBodies.erase(ocean.registeredBodies.begin() + static_cast<std::ptrdiff_t>(index));
+            ocean.wakeStates.erase(ocean.wakeStates.begin() + static_cast<std::ptrdiff_t>(index));
+            if (index < ocean.bodyVolumes.size())
+            {
+                ocean.bodyVolumes.erase(ocean.bodyVolumes.begin() + static_cast<std::ptrdiff_t>(index));
+            }
+            refreshRegisteredBodyStatistics();
+        }
+    }
+
     // Automatic wakes for one fixed step: registered bodies walked in
     // ascending body-handle order accumulate travelled horizontal distance;
     // past the configured spacing at a speed above the threshold, a ripple
@@ -566,24 +642,21 @@ private:
         {
             return;
         }
-        // One batched state read per pass instead of one call per body; the
-        // resolved count prunes registrations whose body died in the rigid
-        // world (their stale velocity would otherwise plant a phantom wake
-        // at the last seen position).
+        // Free registrations whose body died in the rigid world first (the
+        // per-entry prune); their stale velocity would otherwise plant a
+        // phantom wake at the last seen position.
+        pruneDeadRegistrations(ocean);
+        if (ocean.registeredBodies.empty())
+        {
+            return;
+        }
         wakeStatesScratch_.resize(ocean.registeredBodies.size());
         const std::uint32_t resolved = rigid_->copyBodyStates(rigid_->self, ocean.world,
             ocean.registeredBodies.data(), static_cast<std::uint32_t>(ocean.registeredBodies.size()),
             wakeStatesScratch_.data());
-        for (std::size_t index = ocean.registeredBodies.size(); index > resolved; --index)
+        if (resolved == 0u)
         {
-            const std::size_t position = index - 1;
-            ocean.registeredBodies.erase(ocean.registeredBodies.begin() + static_cast<std::ptrdiff_t>(position));
-            ocean.wakeStates.erase(ocean.wakeStates.begin() + static_cast<std::ptrdiff_t>(position));
-            if (position < ocean.bodyVolumes.size())
-            {
-                ocean.bodyVolumes.erase(ocean.bodyVolumes.begin() + static_cast<std::ptrdiff_t>(position));
-            }
-            refreshRegisteredBodyStatistics();
+            return; // the rigid world vanished mid-pass: nothing to wake from
         }
         for (std::size_t index = 0; index < ocean.registeredBodies.size(); ++index)
         {
@@ -800,6 +873,15 @@ private:
         }
         const double forceScale = static_cast<double>(lodInterval);
         std::uint64_t applied = 0;
+        // Free registrations whose body died in the rigid world first. The
+        // batched reads below fill results in place over the pruned list, so
+        // every remaining entry resolves and the index-parallel scratch
+        // arrays stay aligned with registeredBodies throughout the pass.
+        pruneDeadRegistrations(*ocean);
+        if (ocean->registeredBodies.empty())
+        {
+            return true;
+        }
         // Batched reads: two calls per pass instead of two per body.
         buoyancyStates_.resize(ocean->registeredBodies.size());
         buoyancyDescriptions_.resize(ocean->registeredBodies.size());
@@ -809,25 +891,17 @@ private:
         const std::uint32_t resolvedDescriptions = rigid_->copyBodyDescriptions(rigid_->self, ocean->world,
             ocean->registeredBodies.data(), static_cast<std::uint32_t>(ocean->registeredBodies.size()),
             buoyancyDescriptions_.data());
+        if (resolvedStates == 0u || resolvedDescriptions == 0u)
+        {
+            return true; // the rigid world vanished mid-pass: nothing to apply
+        }
         ocean->bodyVolumes.resize(ocean->registeredBodies.size(), -1.0);
-        for (std::size_t index = 0; index < ocean->registeredBodies.size();)
+        for (std::size_t index = 0; index < ocean->registeredBodies.size(); ++index)
         {
             const engine::physics_rigid::BodyHandle body = ocean->registeredBodies[index];
-            const bool resolved = index < resolvedStates && index < resolvedDescriptions;
-            if (!resolved)
-            {
-                // The body died in the rigid world: free the registration.
-                ocean->registeredBodies.erase(ocean->registeredBodies.begin()
-                                              + static_cast<std::ptrdiff_t>(index));
-                ocean->wakeStates.erase(ocean->wakeStates.begin() + static_cast<std::ptrdiff_t>(index));
-                ocean->bodyVolumes.erase(ocean->bodyVolumes.begin() + static_cast<std::ptrdiff_t>(index));
-                refreshRegisteredBodyStatistics();
-                continue;
-            }
             const engine::physics_rigid::BodyState &state = buoyancyStates_[index];
             const engine::physics_rigid::BodyDescription &description = buoyancyDescriptions_[index];
             const std::size_t registrationIndex = index;
-            ++index;
             if (!state.awake)
             {
                 continue;
@@ -874,12 +948,16 @@ private:
             {
                 continue;
             }
-            // Gravity magnitude from the ocean's own world; buoyancy pushes
-            // opposite to it.
-            const double buoyancyForce[3]
-                = {0.0, settings_.waterDensity * volume * ocean->gravityMagnitude * forceScale, 0.0};
-            const double centroidPoint[3] = {submergedCentroid.x, submergedCentroid.y, submergedCentroid.z};
-            rigid_->applyForceAtPoint(rigid_->self, ocean->world, body, buoyancyForce, centroidPoint);
+            // Buoyancy = -rho * V * g against the ocean's own world gravity
+            // VECTOR (not a hardcoded +Y): a tilted gravity field pushes the
+            // float opposite its actual direction with the true magnitude, and
+            // a |g| of zero (a weightless world) legitimately produces no
+            // buoyancy force.
+            const double     buoyancyMagnitude = settings_.waterDensity * volume * forceScale;
+            const math::Vec3 buoyancyForce    = ocean->gravity * (-buoyancyMagnitude);
+            const double     forceArray[3]    = {buoyancyForce.x, buoyancyForce.y, buoyancyForce.z};
+            const double     centroidPoint[3] = {submergedCentroid.x, submergedCentroid.y, submergedCentroid.z};
+            rigid_->applyForceAtPoint(rigid_->self, ocean->world, body, forceArray, centroidPoint);
 
             // Quadratic water drag on the submerged part: opposite the body
             // velocity relative to the ocean's uniform current, scaled by the

@@ -373,9 +373,9 @@ struct RenderCapability
     // texture divide by this mean so the multiply preserves the base color's
     // overall brightness on average and only adds detail. Returns false with
     // RenderError::InvalidTexture when the handle is unknown. Appended at the
-    // end of the struct: field offsets of the existing entries and the ABI
-    // version are unchanged; callers must null-check the entry (a module
-    // built before this field leaves it null).
+    // end of the struct as part of the 13 -> 14 ABI bump: field offsets of
+    // the existing entries are unchanged; callers must null-check the entry
+    // (a module built before ABI 14 leaves it null).
     bool (*textureMean)(void *self, RendererHandle renderer, TextureHandle texture, float *outMean,
         RenderError *error);
 };

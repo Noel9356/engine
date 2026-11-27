@@ -1156,10 +1156,16 @@ private:
         std::uint32_t resolved = 0;
         for (std::uint32_t index = 0; index < bodyCount; ++index)
         {
+            // The capability documents that entries for unknown handles stay
+            // default-constructed, so every slot is written: resolved handles
+            // get their record, unresolved ones get the documented default
+            // instead of the caller's uninitialized buffer contents.
+            OutRecord &record = outRecords[index];
+            record            = OutRecord{};
             const auto iterator = world->bodyIndexByHandle.find(bodies[index]);
             if (iterator != world->bodyIndexByHandle.end())
             {
-                fillOne(outRecords[index], world->bodies[iterator->second]);
+                fillOne(record, world->bodies[iterator->second]);
                 ++resolved;
             }
         }

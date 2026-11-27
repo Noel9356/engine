@@ -169,6 +169,12 @@ private:
 
     void waitForDeviceQuiet(); // vkDeviceWaitIdle + drain frame fences + finish uploads
 
+    // Skip-path recovery for a frame that acquired an image but never
+    // submitted (image-fence timeout, command-buffer begin failure, submit
+    // failure): replaces the stranded acquire semaphore and re-arms the slot
+    // fence with an empty submission when beginFrame had already reset it.
+    void abandonAcquiredImage(bool slotFenceWasReset);
+
     // One minimal real frame submitted at the end of create(), on the creator
     // thread, so driver-side deferred pipeline compilation (and every other
     // first-submit cost) completes while the application still pumps the OS
@@ -179,6 +185,11 @@ private:
     // geometrically; one pair per frame in flight.
     bool ensureOverlayBuffers(std::uint32_t frameIndex, VkDeviceSize vertexBytes, VkDeviceSize indexBytes);
     void destroyOverlayBuffers() noexcept;
+
+    // Frees the overlay buffers a growth step retired on this slot; called
+    // from beginFrame once the slot's fence proves the referencing commands
+    // complete.
+    void retireOverlayBuffers(std::uint32_t frameIndex);
 
     // Frustum-culls and streams the instance matrices into this frame slot's
     // ring buffer. The mesh's bounding-sphere data rides along as values (the
@@ -197,8 +208,6 @@ private:
     void destroyInstanceBuffers() noexcept;
 
     window::WindowHandle surfaceHandle_ = 0;
-
-    bool vsync_ = false;
 
     std::uint32_t framesInFlight_                   = defaultMaxFramesInFlight;
     std::uint32_t memoryBudgetUpdateIntervalFrames_ = 120;
@@ -219,6 +228,18 @@ private:
         VmaAllocation indexAllocation  = nullptr;
         void         *indexMapping     = nullptr;
         VkDeviceSize  indexCapacity    = 0; // bytes
+        // Buffers a mid-frame growth step replaced (drawOverlay can run
+        // several times per frame; a later call's data can outgrow the
+        // capacity an earlier call's recorded commands already bind).
+        // Destroyed at the slot's next beginFrame, after the fence wait
+        // proves those commands complete - the dynamic-mesh staging path's
+        // retired list is the same pattern.
+        struct RetiredBuffer
+        {
+            VkBuffer      buffer     = VK_NULL_HANDLE;
+            VmaAllocation allocation = nullptr;
+        };
+        std::vector<RetiredBuffer> retired;
     };
     std::vector<OverlayBuffer> overlayBuffers_; // one entry per frame in flight
 
@@ -271,14 +292,39 @@ private:
 
     bool ensureDynamicMeshStaging(std::uint32_t frameIndex, VkDeviceSize bytes);
     void destroyDynamicMeshStaging() noexcept;
+    // The frame slot a deferred destroy queues on: the recording slot
+    // mid-frame, the just-submitted slot between frames (see the .cpp for
+    // why the scheduler's current slot is one retirement too early there).
+    std::uint32_t deferredDestroySlot() const;
     // Copies the update into the frame slot's staging buffer and records the
     // device copy plus the transfer->vertex-input barrier into the frame's
     // command buffer, so the draw that consumes the mesh sees the new data.
+    // Transfer commands are illegal inside a render pass instance (legacy or
+    // dynamic rendering scope alike), so the recording suspends the scope
+    // first and resumes it with LOAD operations afterwards.
     bool recordDynamicMeshUpdate(MeshHandle mesh, const void *vertices, std::uint32_t vertexCount, RenderError *error);
+    // Ends the frame's active render pass / rendering scope (for a transfer
+    // between the frame's draws) - the pair of vkCmdEndRenderPass / vkCmd
+    // EndRendering the frame path uses in endFrame.
+    void suspendDrawingScope(VkCommandBuffer command);
+    // Re-begins the drawing scope after suspendDrawingScope with LOAD
+    // operations (the frame's already-drawn contents survive), then rebinds
+    // the mesh pipeline, viewport/scissor, set-0 descriptors and resets the
+    // binding caches exactly as beginFrame does: the scope boundary
+    // invalidates every cached binding.
+    void resumeDrawingScope(VkCommandBuffer command);
     void flushPendingMeshUpdates();
     void retireDynamicMeshStaging(std::uint32_t frameIndex); // frees buffers replaced last time the slot ran
 
     bool frameActive_ = false; // true between a successful beginFrame and endFrame; draw calls check it
+    // True only while the frame's render pass / rendering scope is actually
+    // open on the recording command buffer: beginFrame opens it after the
+    // parked between-frames mesh updates flush (their copies record before
+    // the pass, where no suspension is needed), endFrame closes it, and the
+    // mid-frame update path suspends and resumes around its transfer. The
+    // suspend/resume pair keys off this flag so a flush that runs before the
+    // scope opens cannot record a scope end with no scope begun.
+    bool drawingScopeActive_ = false;
 
     // Bind-state caches so repeated draws skip redundant vkCmd* calls.
     // lastBoundPipeline_ tracks which of the backend's graphics pipelines
@@ -286,9 +332,10 @@ private:
     // pipeline and every mesh draw binds the mesh pipeline back, pushing its
     // constants again (the two layouts have different push constant sizes,
     // so a pipeline switch invalidates the push cache). Within the mesh
-    // pipeline, lastMeshDepthWrite_ / lastMeshTwoSided_ track the depth-write
-    // and two-sided variants so materials toggle between the twins without
-    // rebinding while the flags hold steady.
+    // pipeline, lastMeshDepthWrite_ / lastMeshTwoSided_ / lastMeshTransparent_
+    // track the depth-write, two-sided and transparent variants so materials
+    // toggle between the twins without rebinding while the flags hold
+    // steady.
     enum class BoundPipeline : std::uint8_t
     {
         Mesh,
@@ -302,6 +349,7 @@ private:
     BoundPipeline   lastBoundPipeline_          = BoundPipeline::Mesh;
     bool            lastMeshDepthWrite_         = true;
     bool            lastMeshTwoSided_           = false;
+    bool            lastMeshTransparent_       = false;
     MeshHandle      lastBoundMesh_              = invalidMesh;
     VkDescriptorSet lastBoundMaterialSet_       = VK_NULL_HANDLE;
     VkDeviceSize    lastBoundInstanceOffset_    = 0;
@@ -326,7 +374,7 @@ private:
     ProbeGridUniformData packedProbeGrid_{};
     std::uint64_t        probeGridRevision_    = 0;
     bool                 probeGridDirty_       = false;
-    std::vector<float>   packedProbeRecords_{}; // giProbeRecordVec4s floats per probe
+    std::vector<float>   packedProbeRecords_{}; // giProbeRecordFloats floats per probe
 
     FrameUniformData cachedFrameUniform_{}; // rebuilt only when inputs change (frameUniformDirty_)
     std::uint64_t    frameUniformRevision_ = 0;
@@ -381,9 +429,6 @@ private:
     bool  srgbOutput_      = false;
     float anisotropyLevel_ = 1.0f;
 
-    // Set from the device profile; when true the backend uses vkCmdBeginRendering
-    // instead of render passes/framebuffers.
-    bool dynamicRenderingEnabled_ = false;
 };
 
 } // namespace renderer

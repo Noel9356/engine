@@ -16,12 +16,37 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 
 namespace engine
 {
 namespace renderer
 {
+
+namespace detail
+{
+// Flag-proof finiteness test, the dynamic_resolution.hpp twin (duplicated
+// here because this is a PUBLIC header and must stay self-contained - the
+// module-internal finite_math.hpp cannot be included from the public include
+// directory): the module's own translation units are not compiled with
+// -ffinite-math-only, but an APPLICATION that constructs this tracker may
+// compile its own units with -ffast-math - and under that flag GCC folds
+// std::isfinite(x) to constant true, which would let a NaN fraction past the
+// constructor's documented fold-back (std::clamp keeps NaN; every pressure
+// comparison against a NaN fraction is then false, so the tracker silently
+// never reports pressure). Reading the exponent bits through a memcpy
+// re-interpretation cannot be folded under any math flag combination.
+[[nodiscard]] inline bool finiteFloat(float value) noexcept
+{
+    static_assert(sizeof(float) == sizeof(std::uint32_t), "IEEE-754 binary32 float expected");
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return (bits & 0x7F800000u) != 0x7F800000u;
+}
+} // namespace detail
 
 enum class MemoryBudgetPressure : std::uint8_t
 {
@@ -44,10 +69,18 @@ public:
     // at <= leaveFraction. The gap between the two is the hysteresis band;
     // keep enter > leave so a sample hovering at the boundary cannot
     // oscillate the state. Defaults: enter at 7/8 used, leave at 3/4 used.
+    // An inverted or non-finite pair (leave >= enter) would flip the state on
+    // every boundary sample, so the constructor folds it back to a valid
+    // band (leave clamped below enter) instead of trusting the caller.
     explicit MemoryBudgetTracker(float enterFraction = 0.875f, float leaveFraction = 0.75f) noexcept
-        : enterFraction_(enterFraction),
-          leaveFraction_(leaveFraction)
-    {}
+        : enterFraction_(detail::finiteFloat(enterFraction) ? std::clamp(enterFraction, 0.0f, 1.0f) : 0.875f),
+          leaveFraction_(detail::finiteFloat(leaveFraction) ? std::clamp(leaveFraction, 0.0f, 1.0f) : 0.75f)
+    {
+        if (leaveFraction_ >= enterFraction_)
+        {
+            leaveFraction_ = enterFraction_ > 0.0f ? enterFraction_ * 0.75f : 0.0f;
+        }
+    }
 
     // Records one sample. Returns true when the sample caused a pressure
     // transition (details in lastEvent()); repeated identical samples are

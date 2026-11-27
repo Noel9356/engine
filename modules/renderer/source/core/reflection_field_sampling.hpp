@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "finite_math.hpp"
+
 #include <engine/reflection_field/capabilities.hpp>
 
 #include <glm/glm.hpp>
@@ -62,6 +64,21 @@ inline PreparedReflectionField prepareReflectionField(const ReflectionField &fie
     PreparedReflectionField prepared;
     if (field.valid())
     {
+        // The provider-owned view-projection must be finite before the pixel
+        // path projects through it (the same gate prepareGatherField runs for
+        // the gather field): a NaN/Inf entry survives the sampler's bounds
+        // test as NaN screen coordinates - every NaN comparison is false, so
+        // the rejection chain never fires - and reaches the uint32 texel
+        // cast as undefined behaviour with a wild index. The roughness band
+        // edge is gated alongside so the band comparisons below cannot be
+        // poisoned either. The bit-level tests cannot be folded away by the
+        // rasterizer unit's math flags (see finite_math.hpp); a non-finite
+        // header keeps the field inactive, which is the documented "no
+        // reflections" fallback (legacy specular-only shading).
+        if (!isFiniteRange(field.header.viewProjection, 16u) || !isFinite(field.header.maxRoughness))
+        {
+            return prepared;
+        }
         prepared.viewProjection = glm::make_mat4(field.header.viewProjection);
         prepared.width          = field.header.width;
         prepared.height         = field.header.height;
@@ -116,8 +133,15 @@ inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, con
     }
     const float u = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(field.width) - 0.5f;
     const float v = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(field.height) - 0.5f;
-    if (u < 0.0f || v < 0.0f || u > static_cast<float>(field.width) - 1.0f
-        || v > static_cast<float>(field.height) - 1.0f)
+    // Conjunction form (all four comparisons must HOLD): a NaN coordinate
+    // fails `u >= 0.0f` and is rejected, while the disjunction form it
+    // replaces (`u < 0.0f || ...`) lets NaN slip through every comparison
+    // and continue into the uint32 floor cast. NaN can still arise here with
+    // a finite matrix when extreme world positions overflow the projection
+    // and the terms cancel (Inf - Inf), so the belt stays even though
+    // prepareReflectionField gates the matrix itself.
+    if (!(u >= 0.0f && v >= 0.0f && u <= static_cast<float>(field.width) - 1.0f
+            && v <= static_cast<float>(field.height) - 1.0f))
     {
         return glm::vec3(0.0f);
     }

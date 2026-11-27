@@ -155,8 +155,20 @@ inline std::uint32_t projectParticleSphereOverlaps(engine::physics_rigid::Physic
         return 0u;
     }
     results.resize(queries.size());
-    rigid->collideSpheres(rigid->self, world, queries.data(), static_cast<std::uint32_t>(queries.size()),
-        results.data());
+    const std::uint32_t processed = rigid->collideSpheres(rigid->self, world, queries.data(),
+        static_cast<std::uint32_t>(queries.size()), results.data());
+    if (processed < queries.size())
+    {
+        // The provider wrote nothing (the rigid world is gone) and resize()
+        // keeps the previous call's contents, so every entry is neutralized
+        // before the walk - the scratch is caller-owned and shared across
+        // systems, and re-reading stale hits would push particles by their
+        // old depths along old normals every substep.
+        for (engine::physics_rigid::SphereOverlapResult &result : results)
+        {
+            result = engine::physics_rigid::SphereOverlapResult{};
+        }
+    }
     std::uint32_t hits = 0u;
     for (std::size_t entry = 0; entry < querySlots.size(); ++entry)
     {

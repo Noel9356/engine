@@ -28,6 +28,7 @@
 #include <engine/renderer/mesh.hpp>
 
 #include "draw_scheduler.hpp"
+#include "finite_math.hpp"
 #include "frame_inputs.hpp"
 #include "headless_backend.hpp"
 #include "render_backend.hpp"
@@ -565,6 +566,18 @@ private:
             return false;
         }
         if (mesh == invalidMesh || vertices == nullptr || vertexCount == 0)
+        {
+            reportError(error, RenderError::InvalidMesh);
+            return false;
+        }
+        // Same finiteness contract as the creation stream (render_data.cpp
+        // rejects a non-finite float there): the update replaces the whole
+        // vertex stream, so a NaN/Inf entry must not slip through the update
+        // side door into the backends' bounding spheres and the CPU
+        // rasterizer's interpolants. One gate covers both backends; the
+        // bit-level test reads through memcpy, so a packed (unaligned)
+        // stream is as acceptable here as it is at creation.
+        if (!isFiniteRange(vertices, static_cast<std::size_t>(vertexCount) * meshVertexFloatCount))
         {
             reportError(error, RenderError::InvalidMesh);
             return false;

@@ -249,7 +249,11 @@ private:
                                                                 : schedule->description.defaultUpdateInterval;
         item.importance     = std::clamp(description->importance, 0.0, 1.0);
         item.level          = levelForScore(schedule->description, item.importance);
-        item.due            = (schedule->stepIndex + item.slotIndex) % item.updateInterval == 0u;
+        // The provisional flag predicts the NEXT update pass (which
+        // increments stepIndex first), so it evaluates one step ahead; a
+        // consumer querying isItemDue between addItem and the first pass
+        // then sees exactly what the next pass will report.
+        item.due            = (schedule->stepIndex + 1u + item.slotIndex) % item.updateInterval == 0u;
         schedule->items.push_back(std::move(item));
         schedule->itemIndexById.emplace(schedule->items.back().id, schedule->items.size() - 1);
         return true;
@@ -269,12 +273,17 @@ private:
         }
         const std::size_t index = iterator->second;
         schedule->itemIndexById.erase(iterator);
-        if (index + 1 != schedule->items.size())
+        // Order-preserving compaction, as the documented contract states
+        // ("registration order is the iteration order; copyItemStates and
+        // copyDueItems stay in registration order"): the swap-with-back a
+        // removal used here moved the last-registered item into the middle,
+        // breaking that order for every later query. Erase shifts the tail
+        // down and the index map entries move with the shifted items.
+        schedule->items.erase(schedule->items.begin() + static_cast<std::ptrdiff_t>(index));
+        for (std::size_t shifted = index; shifted < schedule->items.size(); ++shifted)
         {
-            schedule->items[index] = schedule->items.back();
-            schedule->itemIndexById[schedule->items[index].id] = index;
+            schedule->itemIndexById[schedule->items[shifted].id] = shifted;
         }
-        schedule->items.pop_back();
         return true;
     }
 
@@ -297,7 +306,9 @@ private:
             return false;
         }
         item->updateInterval = interval;
-        item->due            = (schedule->stepIndex + item->slotIndex) % interval == 0u;
+        // Same one-step-ahead prediction as addItem (the next pass
+        // increments stepIndex before evaluating).
+        item->due            = (schedule->stepIndex + 1u + item->slotIndex) % interval == 0u;
         return true;
     }
 
@@ -404,11 +415,16 @@ private:
             return false;
         }
         *outRequired = static_cast<std::uint32_t>(schedule->items.size());
-        if (outStates == nullptr || capacity < schedule->items.size())
+        // The documented contract: "copyItemStates writes up to capacity
+        // states and reports the required count" - a short buffer gets a
+        // partial snapshot instead of nothing.
+        if (outStates == nullptr)
         {
             return false;
         }
-        for (std::size_t index = 0; index < schedule->items.size(); ++index)
+        const std::size_t copied = capacity < schedule->items.size() ? static_cast<std::size_t>(capacity)
+                                                                     : schedule->items.size();
+        for (std::size_t index = 0; index < copied; ++index)
         {
             const ItemRecord &item = schedule->items[index];
             ItemState         state;

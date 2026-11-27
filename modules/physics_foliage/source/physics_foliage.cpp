@@ -210,20 +210,35 @@ private:
                   * instance.description.swayScale;
 
             double target[2] = {0.0, 0.0};
-            if (windSpeedHorizontal > 1.0e-9)
+            if (windSpeedHorizontal > 1.0e-9 && std::isfinite(windSpeedHorizontal))
             {
-                target[0] = windVelocity[0] / windSpeedHorizontal * (targetMagnitude + swayMagnitude);
-                target[1] = windVelocity[2] / windSpeedHorizontal * (targetMagnitude + swayMagnitude);
+                // The horizontal speed of a validated wind sample is finite
+                // but its square can still overflow for extreme speeds; the
+                // isfinite guard keeps the normalized direction and the
+                // target magnitude from producing 0 x Inf = NaN bends.
+                const double directionX = windVelocity[0] / windSpeedHorizontal;
+                const double directionZ = windVelocity[2] / windSpeedHorizontal;
+                const double magnitude = targetMagnitude + swayMagnitude;
+                if (std::isfinite(magnitude))
+                {
+                    target[0] = directionX * magnitude;
+                    target[1] = directionZ * magnitude;
+                }
             }
 
             // Stability-aware spring gains: a LOD due step covers interval x
-            // the caller's delta, and semi-implicit Euler stays stable while
-            // h x damping < 2 and h^2 x stiffness < 4, so the gains clamp to
-            // that bound on enlarged steps (full-rate steps with the default
-            // configuration never reach it).
+            // the caller's delta. Semi-implicit Euler on the damped spring is
+            // stable inside the JOINT Jury region h^2 k + 2 h c < 4 - clamping
+            // each term to its own bound (h^2 k < 3.2 and h c < 1.8)
+            // satisfies neither bound jointly (3.2 + 2 x 1.8 = 6.8 > 4) and
+            // lets contract-valid gains diverge. Stiffness clamps first,
+            // then damping clamps to the residual the stiffness left, so the
+            // pair always lands inside the region with margin (sum <= 3.6).
             const double stiffness = std::min(std::max(field.description.springStiffness, 1.0e-6),
                 3.2 / (stepDeltaSeconds * stepDeltaSeconds));
-            const double damping   = std::min(std::max(field.description.springDamping, 0.0), 1.8 / stepDeltaSeconds);
+            const double dampingStabilityBudget = 3.6 - stiffness * stepDeltaSeconds * stepDeltaSeconds;
+            const double damping = std::min(std::max(field.description.springDamping, 0.0),
+                std::min(1.8 / stepDeltaSeconds, dampingStabilityBudget / (2.0 * stepDeltaSeconds)));
             for (std::uint32_t axis = 0; axis < 2; ++axis)
             {
                 const double acceleration
@@ -301,6 +316,11 @@ private:
         {
             field.instances[instance].description = description->instances[instance];
         }
+        // The record owns the instance copies; the stored description keeps
+        // no view of the caller's array (the rope/cloth/planter records drop
+        // borrowed pointers the same way).
+        field.description.instances    = nullptr;
+        field.description.instanceCount = 0;
         totalInstances_ += description->instanceCount;
         // Simulation LOD: the stagger phase derives from the registration
         // ordinal, so fields sharing an interval spread their work across

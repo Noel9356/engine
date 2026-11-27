@@ -23,6 +23,8 @@
 // the radiance_cache module applies to its own trace.
 #pragma once
 
+#include "finite_math.hpp"
+
 #include <glm/geometric.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -171,7 +173,7 @@ inline bool sunShadowFitMap(SunShadowMap &map, const std::vector<SunShadowGeomet
     float halfU   = (maximum.x - minimum.x) * 0.5f;
     float halfV   = (maximum.y - minimum.y) * 0.5f;
     if (receiverMin != nullptr && receiverMax != nullptr && receiverMax->x > receiverMin->x
-        && receiverMax->y > receiverMin->y && std::isfinite(receiverMin->x) && std::isfinite(receiverMax->x))
+        && receiverMax->y > receiverMin->y && isFinite(receiverMin->x) && isFinite(receiverMax->x))
     {
         glm::vec3 receiverLight[8];
         std::size_t corner = 0;
@@ -224,7 +226,24 @@ inline bool sunShadowFitMap(SunShadowMap &map, const std::vector<SunShadowGeomet
         halfU   = (uMax - uMin) * 0.5f * kReceiverPadding + 0.25f;
         halfV   = (vMax - vMin) * 0.5f * kReceiverPadding + 0.25f;
     }
-    const float dCenter     = (minimum.z + maximum.z) * 0.5f;
+    const float dCenter   = (minimum.z + maximum.z) * 0.5f;
+    const float minDepth  = (minimum.z - maximum.z) * 0.5f;
+    const float depthSpan = std::max(maximum.z - minimum.z, 1.0e-3f);
+
+    // The fit's invariant: every published parameter finite. Caster bounds
+    // carrying Inf (or a receiver box whose padded extents overflow) would
+    // leave the projection basis degenerate - halfWidth infinite collapses
+    // every u to 0.5, a NaN center sends the projections through 0 * Inf.
+    // Rejecting keeps the map invalid and both samplers reading fully lit;
+    // the rasterizer's own projection guard below stays the second line of
+    // defense. Bit-level test, like the rasterizer guards: this header
+    // compiles inside a -ffast-math unit where std::isfinite is constant
+    // true.
+    if (!isFinite(uCenter) || !isFinite(vCenter) || !isFinite(dCenter) || !isFinite(halfU) || !isFinite(halfV)
+        || !isFinite(minDepth) || !isFinite(depthSpan))
+    {
+        return false;
+    }
 
     map.resolution    = resolution;
     map.sunDirection  = sunWard;
@@ -234,8 +253,8 @@ inline bool sunShadowFitMap(SunShadowMap &map, const std::vector<SunShadowGeomet
     map.forward       = forward;
     map.halfWidth     = halfU;
     map.halfHeight    = halfV;
-    map.minDepth      = (minimum.z - maximum.z) * 0.5f;
-    map.depthExtent   = std::max(maximum.z - minimum.z, 1.0e-3f);
+    map.minDepth      = minDepth;
+    map.depthExtent   = depthSpan;
     map.texelWorldSize
         = std::max(map.halfWidth, map.halfHeight) * 2.0f / static_cast<float>(resolution);
 
@@ -297,12 +316,25 @@ inline void sunShadowRasterCasters(SunShadowMap &map, const std::vector<SunShado
                     caster.positions[vertexIndex * 3 + 2], 1.0f);
                 world[corner] = glm::vec3(model * local);
                 unit[corner]  = project(world[corner]);
-                if (unit[corner].x < -0.05f || unit[corner].x > 1.05f || unit[corner].y < -0.05f
-                    || unit[corner].y > 1.05f || unit[corner].z < 0.0f || unit[corner].z > 1.0f)
+                // Finiteness first, and through the exponent bits: this
+                // header compiles inside a -ffast-math unit where
+                // std::isfinite folds to constant true, and a NaN coordinate
+                // (a NaN/Inf model-matrix entry or a non-finite vertex) fails
+                // every comparison below, survives the range clamps
+                // (std::max/std::min return the NaN argument) and converts to
+                // INT_MIN in the int32 casts of the scan window - a wild
+                // depthRow index and a read far outside the map. Rejecting
+                // non-finite projections outright keeps the scan indices
+                // inside [0, resolution-1] by construction.
+                if (!isFinite(unit[corner].x) || !isFinite(unit[corner].y)
+                    || !isFinite(unit[corner].z) || unit[corner].x < -0.05f || unit[corner].x > 1.05f
+                    || unit[corner].y < -0.05f || unit[corner].y > 1.05f || unit[corner].z < 0.0f
+                    || unit[corner].z > 1.0f)
                 {
                     // The fit box contains every caster's bounds, so this only
-                    // rejects guard-band padding artifacts; both sides of the
-                    // clip keep the conservative min-depth rasterization safe.
+                    // rejects guard-band padding artifacts (and degenerate
+                    // projections); both sides of the clip keep the
+                    // conservative min-depth rasterization safe.
                     inside = false;
                     break;
                 }
@@ -317,7 +349,11 @@ inline void sunShadowRasterCasters(SunShadowMap &map, const std::vector<SunShado
             // the light wins, the depth-buffer rule).
             const float area = (unit[1].x - unit[0].x) * (unit[2].y - unit[0].y)
                 - (unit[2].x - unit[0].x) * (unit[1].y - unit[0].y);
-            if (std::abs(area) < 1.0e-12f)
+            // A NaN area fails the magnitude test (every NaN comparison is
+            // false) and would poison the scan window below; see the guard
+            // band note above (bit-level test for the same -ffast-math
+            // reason).
+            if (!isFinite(area) || std::abs(area) < 1.0e-12f)
             {
                 continue;
             }
@@ -365,11 +401,18 @@ inline void sunShadowRasterCasters(SunShadowMap &map, const std::vector<SunShado
                     }
                     const float depth = w0 * unit[0].z + w1 * unit[1].z + w2 * unit[2].z;
                     float &cell = depthRow[static_cast<std::uint32_t>(column)];
-                    if (depth < cell)
+                    if constexpr (AtomicStore)
                     {
-                        if constexpr (AtomicStore)
+                        // Concurrent workers may hold this cell in their own
+                        // CAS loop: read through the atomic_ref so the test and
+                        // the compare-exchange observe one consistent object
+                        // (a plain read would be a data race against their
+                        // stores). The re-load inside the CAS loop stays the
+                        // authority; this gate only skips provably-occluded
+                        // texels.
+                        std::atomic_ref<float> atomicCell(cell);
+                        if (depth < atomicCell.load(std::memory_order_relaxed))
                         {
-                            std::atomic_ref<float> atomicCell(cell);
                             float expected = atomicCell.load(std::memory_order_relaxed);
                             while (depth < expected)
                             {
@@ -380,7 +423,10 @@ inline void sunShadowRasterCasters(SunShadowMap &map, const std::vector<SunShado
                                 }
                             }
                         }
-                        else
+                    }
+                    else
+                    {
+                        if (depth < cell)
                         {
                             cell = depth;
                         }

@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -23,28 +25,35 @@ namespace engine::util
 namespace png_detail
 {
 
-// CRC-32 (IEEE 802.3 polynomial) over the PNG chunk type and data.
+// CRC-32 (IEEE 802.3 polynomial) over the PNG chunk type and data. The
+// table is a compile-time constant (every entry is a pure function of its
+// index), so concurrent writers share it without a lazy-initialization race.
+inline constexpr std::uint32_t crc32TableEntry(std::uint32_t index)
+{
+    std::uint32_t value = index;
+    for (int bit = 0; bit < 8; ++bit)
+    {
+        value = (value & 1u) != 0u ? 0xEDB88320u ^ (value >> 1) : value >> 1;
+    }
+    return value;
+}
+
+inline constexpr std::array<std::uint32_t, 256> crc32Table = []
+{
+    std::array<std::uint32_t, 256> table{};
+    for (std::uint32_t index = 0; index < 256; ++index)
+    {
+        table[index] = crc32TableEntry(index);
+    }
+    return table;
+}();
+
 inline std::uint32_t crc32Update(std::uint32_t crc, const std::uint8_t *data, std::size_t size)
 {
-    static std::uint32_t table[256];
-    static bool tableReady = false;
-    if (!tableReady)
-    {
-        for (std::uint32_t index = 0; index < 256; ++index)
-        {
-            std::uint32_t value = index;
-            for (int bit = 0; bit < 8; ++bit)
-            {
-                value = (value & 1u) != 0u ? 0xEDB88320u ^ (value >> 1) : value >> 1;
-            }
-            table[index] = value;
-        }
-        tableReady = true;
-    }
     crc ^= 0xFFFFFFFFu;
     for (std::size_t index = 0; index < size; ++index)
     {
-        crc = table[(crc ^ data[index]) & 0xFFu] ^ (crc >> 8);
+        crc = crc32Table[(crc ^ data[index]) & 0xFFu] ^ (crc >> 8);
     }
     return crc ^ 0xFFFFFFFFu;
 }
@@ -61,13 +70,15 @@ inline void appendBigEndian32(std::vector<std::uint8_t> &bytes, std::uint32_t va
 inline void appendChunk(std::vector<std::uint8_t> &png, const char type[4], const std::vector<std::uint8_t> &data)
 {
     appendBigEndian32(png, static_cast<std::uint32_t>(data.size()));
-    std::vector<std::uint8_t> crcInput;
-    crcInput.reserve(4u + data.size());
+    std::vector<std::uint8_t> crcInput(4u + data.size());
     for (int index = 0; index < 4; ++index)
     {
-        crcInput.push_back(static_cast<std::uint8_t>(type[index]));
+        crcInput[static_cast<std::size_t>(index)] = static_cast<std::uint8_t>(type[index]);
     }
-    crcInput.insert(crcInput.end(), data.begin(), data.end());
+    if (!data.empty())
+    {
+        std::copy(data.begin(), data.end(), crcInput.begin() + 4);
+    }
     png.insert(png.end(), crcInput.begin(), crcInput.end());
     appendBigEndian32(png, crc32Update(0u, crcInput.data(), crcInput.size()));
 }

@@ -208,9 +208,11 @@ public:
     }
 
     // Swaps the queue under the lock, then publishes outside it so handlers
-    // may enqueue deferred events again without deadlock. An exception from a
-    // handler leaves already-delivered events dropped and the undelivered
-    // remainder queued for the next flush, so delivery is never duplicated.
+    // may enqueue deferred events again without deadlock. An exception from
+    // a handler leaves the events after the failing one queued for the next
+    // flush; every event of the batch is dispatched at most once (the
+    // failing event's handler already ran), so delivery is never duplicated
+    // and a persistently failing handler cannot block the events behind it.
     void flushDeferred()
     {
         {
@@ -231,11 +233,12 @@ public:
         }
         catch (...)
         {
-            // Re-queue only the events that were not delivered; the processed
-            // prefix is consumed permanently.
+            // Re-queue only the events after the one whose handler threw;
+            // the dispatched prefix - including the failing event, whose
+            // handler already ran - is consumed permanently.
             std::lock_guard<std::mutex> lock(deferredMutex);
             deferredEvents.insert(deferredEvents.begin(),
-                std::make_move_iterator(deferredDrain.begin() + static_cast<std::ptrdiff_t>(delivered)),
+                std::make_move_iterator(deferredDrain.begin() + static_cast<std::ptrdiff_t>(delivered) + 1),
                 std::make_move_iterator(deferredDrain.end()));
             deferredDrain.clear();
             throw;
@@ -429,7 +432,7 @@ private:
         std::size_t insertPosition = handlers.size();
         for (std::size_t index = 0; index < handlers.size(); ++index)
         {
-            if (handlers[index].priority < entry.priority)
+            if (handlers[index].priority > entry.priority)
             {
                 insertPosition = index;
                 break;
@@ -566,6 +569,11 @@ public:
 
     // Swaps pending under the lock and publishes unlocked so handlers can
     // enqueue again; events enqueued mid-flush wait for the next flush.
+    // A throwing handler re-queues the events after the failing one
+    // (mirroring EventChannel::flushDeferred) so no event is lost: every
+    // event of the batch is dispatched at most once - the failing event's
+    // handler already ran and is consumed with the processed prefix, so a
+    // persistently failing handler cannot block the queue behind it.
     void flush() override
     {
         if (pendingCount.load(std::memory_order_relaxed) == 0)
@@ -587,9 +595,29 @@ public:
             drainBuffer.clear();
             return;
         }
-        for (const EventType &event : drainBuffer)
+        std::size_t delivered = 0;
+        try
         {
-            channel.publish(event);
+            for (; delivered < drainBuffer.size(); ++delivered)
+            {
+                channel.publish(drainBuffer[delivered]);
+            }
+        }
+        catch (...)
+        {
+            {
+                std::lock_guard<std::mutex> lock(queueMutex);
+                pendingEvents.insert(pendingEvents.begin(),
+                    std::make_move_iterator(drainBuffer.begin() + static_cast<std::ptrdiff_t>(delivered) + 1),
+                    std::make_move_iterator(drainBuffer.end()));
+                pendingCount.store(pendingEvents.size(), std::memory_order_relaxed);
+                if (deferredPendingFlag != nullptr && !pendingEvents.empty())
+                {
+                    deferredPendingFlag->store(true, std::memory_order_relaxed);
+                }
+            }
+            drainBuffer.clear();
+            throw;
         }
         drainBuffer.clear();
     }
@@ -609,7 +637,10 @@ private:
     std::atomic<bool>       *deferredPendingFlag = nullptr;
 
     std::atomic<bool>      closed{false};
-    std::mutex             queueMutex;
+    // Mutable: the const observer hasPendingEvents() locks it too (a
+    // synchronization primitive is logically const - locking does not
+    // observe the queue's logical state).
+    mutable std::mutex     queueMutex;
     std::vector<EventType> pendingEvents;
 
     WorkerEventQueueOptions  options{};
@@ -740,8 +771,9 @@ public:
     // before dispatching instead of iterated while handlers run; channels
     // created during this flush are drained on the next call. A throwing
     // handler interrupts the flush; the pending flag is re-armed whenever any
-    // queue retained events, so the next call drains the remainder instead of
-    // stalling until an unrelated deferred publish.
+    // queue retained events - on the failing path and after a completed
+    // flush alike - so the next call drains the remainder instead of stalling
+    // until an unrelated deferred publish.
     void flushDeferredEvents()
     {
         if (!deferredPending.load(std::memory_order_relaxed))
@@ -795,6 +827,7 @@ public:
             restorePendingIfStalled();
             throw;
         }
+        restorePendingIfStalled();
     }
 
     // The bus keeps a shared reference for flushing and closes the queue in

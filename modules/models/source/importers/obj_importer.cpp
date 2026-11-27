@@ -425,6 +425,18 @@ bool importObjFile(const std::filesystem::path &path, ModelRecord &record, const
                 smoothNormalScratch,
                 smoothNormalTouchedFlags,
                 smoothNormalTouchedIndices);
+            // Reversed winding flips every triangle's orientation, so the
+            // accumulated normals (position-welded sums of the per-triangle
+            // cross products) negate exactly - the same value generating
+            // them from the flipped winding would produce (the STL importer
+            // applies the same rule to its flat normals).
+            if (transform.reverseWinding)
+            {
+                for (float &component : smoothNormalScratch)
+                {
+                    component = -component;
+                }
+            }
         }
 
         // One precomputed face normal per triangle for flat shading.
@@ -442,6 +454,15 @@ bool importObjFile(const std::filesystem::path &path, ModelRecord &record, const
                 const tinyobj::real_t  *c = attrib.vertices.data() + static_cast<std::size_t>(indexC.vertex_index) * 3;
                 float faceNormal[3]{};
                 crossProduct3(a, b, c, faceNormal);
+                // Reversed winding flips the emitted triangle orientation,
+                // so the generated face normal flips with it (the emitted
+                // indices reverse below, after the corners are built).
+                if (transform.reverseWinding)
+                {
+                    faceNormal[0] = -faceNormal[0];
+                    faceNormal[1] = -faceNormal[1];
+                    faceNormal[2] = -faceNormal[2];
+                }
                 normalizeVector(faceNormal);
                 std::copy(faceNormal, faceNormal + 3, flatNormals.begin() + (corner / 3) * 3);
             }

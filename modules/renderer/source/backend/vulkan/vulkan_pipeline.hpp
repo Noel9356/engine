@@ -1,6 +1,7 @@
 // Pipelines and descriptor layouts for the Vulkan backend: the mesh PBR
-// pipeline, the alpha-blended shell-fur pipeline, the alpha-blended overlay
-// pipeline, a disk-backed pipeline cache, and the shader modules from the
+// pipeline (plus its depth-write, two-sided and transparent twins), the
+// alpha-blended shell-fur pipeline, the alpha-blended overlay pipeline, a
+// disk-backed pipeline cache, and the shader modules from the
 // generated SPIR-V headers (mesh_*_gen.hpp, fur_*_gen.hpp, ui_*_gen.hpp).
 // Compiled only under ENGINE_RENDERER_BACKEND_VULKAN.
 
@@ -95,6 +96,16 @@ public:
     {
         return renderPass_;
     }
+    // Resume twin of the render pass for the legacy path: identical
+    // attachments (compatible, so the same framebuffers bind) but LOAD
+    // operations and PRESENT_SRC initial layout. The mid-frame
+    // updateMeshVertices path ends the render pass to record a transfer,
+    // then re-begins drawing through this one so the already-drawn contents
+    // survive.
+    VkRenderPass renderPassResume() const
+    {
+        return renderPassResume_;
+    }
     VkDescriptorSetLayout frameSetLayout() const
     {
         return frameSetLayout_;
@@ -131,6 +142,20 @@ public:
     VkPipeline pipelineTwoSidedNoDepthWrite() const
     {
         return pipelineTwoSidedNoDepthWrite_;
+    }
+    // Transparent mesh pipeline variants (src-alpha / one-minus-src-alpha
+    // blending, depth TEST on, depth WRITE off - the transparent pass the
+    // material's opacity contract documents; mesh.frag already outputs
+    // opacity * texel alpha in oColor.a for exactly this blend). Selected
+    // when the material's opacity is below 1; each has its two-sided twin
+    // for double-sided transparent surfaces (cloth sheets, glass panes).
+    VkPipeline pipelineTransparent() const
+    {
+        return pipelineTransparent_;
+    }
+    VkPipeline pipelineTransparentTwoSided() const
+    {
+        return pipelineTransparentTwoSided_;
     }
     VkPipelineLayout overlayPipelineLayout() const
     {
@@ -183,6 +208,7 @@ private:
     bool buildOverlayPipeline(VkDevice device, char *resultScratch, std::size_t resultScratchCapacity);
 
     VkRenderPass          renderPass_            = VK_NULL_HANDLE;
+    VkRenderPass          renderPassResume_      = VK_NULL_HANDLE; // LOAD-op twin (mid-frame transfer resume)
     VkDescriptorSetLayout frameSetLayout_        = VK_NULL_HANDLE; // set 0: one uniform buffer (FrameData)
     VkDescriptorSetLayout materialSetLayout_     = VK_NULL_HANDLE; // set 1: five combined image samplers
     VkPipelineLayout      pipelineLayout_        = VK_NULL_HANDLE;
@@ -190,6 +216,8 @@ private:
     VkPipeline            pipelineNoDepthWrite_  = VK_NULL_HANDLE;
     VkPipeline            pipelineTwoSided_      = VK_NULL_HANDLE;
     VkPipeline            pipelineTwoSidedNoDepthWrite_ = VK_NULL_HANDLE;
+    VkPipeline            pipelineTransparent_   = VK_NULL_HANDLE;
+    VkPipeline            pipelineTransparentTwoSided_ = VK_NULL_HANDLE;
     VkPipelineLayout      furPipelineLayout_     = VK_NULL_HANDLE; // set layouts + 128-byte push constants
     VkPipeline            furPipeline_           = VK_NULL_HANDLE;
     VkPipelineLayout      overlayPipelineLayout_ = VK_NULL_HANDLE; // set 1 layout + 16-byte vertex push constants

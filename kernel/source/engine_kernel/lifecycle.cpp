@@ -6,6 +6,7 @@
 
 #include "capability_provider_index.hpp"
 #include "kernel_internals.hpp"
+#include "trust_gate.hpp"
 
 #include <engine/kernel/dependency_resolver.hpp>
 #include <engine/kernel/engine_kernel.hpp>
@@ -74,7 +75,11 @@ bool EngineKernel::validate(std::string &report)
         appendDiagnosticsReport(permissionDiagnostics, report);
     }
 
-    if (!declareKnownKeyRegistry(report))
+    // The registry's own output is warning-only (malformed participant keys
+    // do not abort), so it is collected separately and joined after the
+    // abort check below.
+    std::string knownKeyWarnings;
+    if (!declareKnownKeyRegistry(knownKeyWarnings))
     {
         report += startupWarnings_;
         return false;
@@ -86,6 +91,7 @@ bool EngineKernel::validate(std::string &report)
         return false;
     }
 
+    report += knownKeyWarnings;
     report += deferredConfigurationWarnings;
     report += startupWarnings_;
 
@@ -138,6 +144,26 @@ bool EngineKernel::runConstructPhase(const DependencyResolver::ResolutionResult 
                         + "' provides the '" + record->scriptPlugin.hostCapability
                         + "' capability but does not host script plugins.\n";
                 return false;
+            }
+            // Re-verify the bundle digest before the scripts execute: the
+            // trust gate hashed the package during discovery, and content
+            // swapped between hashing and hosting must not run under a
+            // digest-bound trust decision (the script twin of
+            // loadModuleLibrary's re-hash before dlopen). An empty advisory
+            // digest means nothing was hashed to verify against - the same
+            // name-only-trust behaviour the native paths keep.
+            if (const ParticipantTrustAdvisory *advisory
+                = trustGate_->advisoryFor(record->name, ParticipantKind::ScriptPlugin);
+                advisory != nullptr && !advisory->sha256.empty())
+            {
+                const std::string bundleDigest
+                    = trustGate_->scriptPluginBundleDigest(record->scriptPlugin.scriptPath.parent_path());
+                if (bundleDigest != advisory->sha256)
+                {
+                    report += "- script plugin '" + record->name
+                            + "' changed on disk after it was hashed for the trust gate; refusing to host it.\n";
+                    return false;
+                }
             }
             try
             {
@@ -243,6 +269,14 @@ std::vector<void *> EngineKernel::resolveEachCapabilityPointer(
 bool EngineKernel::construct(std::string &report)
 {
     report.clear();
+    // A second construct after a successful one is a no-op: the scheduler
+    // from the first pass is still running, and retuning it here would
+    // reject options that arrive while it holds workers. stop() clears the
+    // flag, so construct-after-stop still takes the full path below.
+    if (constructed)
+    {
+        return true;
+    }
     {
         // [engine] tuning (workers, queue limits, priority aging, fairness) maps onto the
         // scheduler options; unset keys keep the current defaults.
@@ -294,10 +328,6 @@ bool EngineKernel::construct(std::string &report)
             taskScheduler_.setOptions(options);
     }
     taskScheduler_.start();
-    if (constructed)
-    {
-        return true;
-    }
 
     // Records gathered by validate (no native code) must be rebuilt for a real
     // construct. Only the gather state is dropped here: stopping the scheduler
@@ -314,6 +344,11 @@ bool EngineKernel::construct(std::string &report)
     capabilityProviderIndex_->reset();
     if (!prepareParticipants(report, true))
     {
+        // The scheduler started above must not keep running after a failed
+        // construct: a retry would reach setOptions with workers held and
+        // throw out of this bool API instead of taking the full path again.
+        stop();
+        report = "engine startup failed:\n" + report;
         return false;
     }
 
@@ -325,6 +360,7 @@ bool EngineKernel::construct(std::string &report)
     if (!report.empty())
     {
         report = "engine startup failed:\n" + report;
+        stop();
         return false;
     }
 
@@ -334,6 +370,8 @@ bool EngineKernel::construct(std::string &report)
     report += resolutionReport;
     if (!resolution.successful)
     {
+        stop();
+        report = "engine startup failed:\n" + report;
         return false;
     }
 
@@ -393,6 +431,17 @@ void EngineKernel::stop()
         try
         {
             bus_.flushDeferredEvents();
+        }
+        catch (const std::exception &error)
+        {
+            // A failing flush must not cancel the shutdown broadcast:
+            // participants that clean up on EngineShutdownStartedEvent
+            // still need to hear about the shutdown (each call gets its own
+            // catch so one failure cannot skip the other).
+            std::fprintf(stderr, "engine kernel: deferred event flush failed: %s\n", error.what());
+        }
+        try
+        {
             bus_.publish(EngineShutdownStartedEvent{});
         }
         catch (const std::exception &error)
@@ -426,20 +475,64 @@ void EngineKernel::stop()
     for (auto iterator = participantStartOrder_.rbegin(); iterator != participantStartOrder_.rend(); ++iterator)
     {
         ParticipantRecord &record = records_[*iterator];
-        if (record.started && record.moduleInstance != nullptr)
+        // Each participant gets its own catch so one failing stop cannot
+        // skip the remaining participants' teardown (the same rule the
+        // flush and shutdown-event calls above follow).
+        try
         {
-            record.moduleInstance->stop();
+            if (record.started && record.moduleInstance != nullptr)
+            {
+                record.moduleInstance->stop();
+            }
+            if (record.started && record.pluginInstance != nullptr)
+            {
+                record.pluginInstance->stop();
+            }
         }
-        if (record.started && record.pluginInstance != nullptr)
+        catch (const std::exception &error)
         {
-            record.pluginInstance->stop();
+            std::fprintf(stderr,
+                "engine kernel: %s '%s' failed during stop: %s\n",
+                describeComponentKind(record.manifest.kind).c_str(),
+                record.name.c_str(),
+                error.what());
         }
+        catch (...)
+        {
+            std::fprintf(stderr,
+                "engine kernel: %s '%s' failed during stop\n",
+                describeComponentKind(record.manifest.kind).c_str(),
+                record.name.c_str());
+        }
+        record.started = false;
     }
+    // Drain again BEFORE any participant is destroyed: the stop() calls
+    // above may legitimately finish async work by submitting final tasks
+    // (the scheduler is still running and accepting them), and those tasks
+    // can hold capability pointers into the participants below. The first
+    // waitIdle only covers tasks submitted before stop() began.
+    taskScheduler_.waitIdle();
     for (ParticipantRecord &record : records_)
     {
         if (record.pluginEntryTable != nullptr && record.pluginInstance != nullptr)
         {
-            record.pluginEntryTable->destroyPlugin(record.pluginInstance);
+            // A failing destroy must not skip the remaining records'
+            // destruction and library unload below.
+            try
+            {
+                record.pluginEntryTable->destroyPlugin(record.pluginInstance);
+            }
+            catch (const std::exception &error)
+            {
+                std::fprintf(stderr,
+                    "engine kernel: plugin '%s' failed during destroy: %s\n",
+                    record.name.c_str(),
+                    error.what());
+            }
+            catch (...)
+            {
+                std::fprintf(stderr, "engine kernel: plugin '%s' failed during destroy\n", record.name.c_str());
+            }
             record.pluginInstance = nullptr;
         }
         record.started     = false;

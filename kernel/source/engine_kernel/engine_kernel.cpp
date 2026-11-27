@@ -33,7 +33,10 @@ void EngineKernel::setConfigurationFile(const std::filesystem::path &configurati
 {
     configurationFilePath = configurationPath;
     configurationLoaded   = false;
-    configurationStore_.reset();
+    // Only the document is invalidated: staged command-line overrides (and
+    // the known-key registry) must survive later path staging, so the call
+    // order of the setters cannot silently drop them (full reset() would).
+    configurationStore_.resetForReload();
 
     participantsGathered = false;
 }
@@ -48,7 +51,8 @@ void EngineKernel::addConfigurationProfileFile(const std::filesystem::path &prof
 
     configurationProfileFilePaths.push_back(profilePath);
     configurationLoaded = false;
-    configurationStore_.reset();
+    // See setConfigurationFile: keep staged overrides across the staging call.
+    configurationStore_.resetForReload();
     participantsGathered = false;
 }
 
@@ -56,7 +60,8 @@ void EngineKernel::setSceneFile(const std::filesystem::path &scenePath)
 {
     sceneFilePath       = scenePath;
     configurationLoaded = false;
-    configurationStore_.reset();
+    // See setConfigurationFile: keep staged overrides across the staging call.
+    configurationStore_.resetForReload();
     participantsGathered = false;
 }
 

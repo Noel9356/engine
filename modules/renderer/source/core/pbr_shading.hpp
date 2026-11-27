@@ -100,23 +100,24 @@ struct GiAmbientSample
 // shader. giGrid is the borrowed probe-grid snapshot; nullptr keeps the
 // legacy ambient path bit-identical. giSample, when non-null, replaces the
 // per-pixel probe walk with a caller-evaluated sample (see GiAmbientSample).
+// The material's opacity is deliberately absent: mesh.frag's diffuse and
+// ambient carry no opacity factor (it reaches the output only through
+// oColor.a and the fixed-function blend), and the commit paths below apply
+// the same single blend - pre-scaling here would composite the diffuse at
+// opacity squared.
 ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPosition,
     const glm::vec3 &cameraPosition, const glm::vec3 &lightDirection, const glm::vec3 &sunRadiance,
     const glm::vec3 &ambientSky, const glm::vec3 &ambientGround, const glm::vec3 &albedo, float metallic,
     float roughness, float ambientOcclusion, const PreparedDirectLight *directLights,
-    std::uint32_t directLightCount, const PreparedGiProbeGrid *giGrid = nullptr, float opacity = 1.0f,
-    float sheenFactor = 0.0f, const GiAmbientSample *giSample = nullptr)
+    std::uint32_t directLightCount, const PreparedGiProbeGrid *giGrid = nullptr, float sheenFactor = 0.0f,
+    const GiAmbientSample *giSample = nullptr)
 {
     // Metallic surfaces carry almost no diffuse response. The hemispheric
     // ambient and the probe-grid GI are diffuse integrals, so they scale by
     // (1 - metallic) exactly like the direct-lighting diffuse below
-    // (mesh.frag keeps the twin of this factor). Transparent surfaces
-    // scatter only the share they keep off the transmitted path, so their
-    // diffuse terms also scale by the opacity: the transmitted share lives
-    // in the reflection field (and in the alpha blend for surfaces outside
-    // the traced band), never in the surface's own diffuse response.
+    // (mesh.frag keeps the twin of this factor).
     metallic              = std::clamp(metallic, 0.0f, 1.0f);
-    const glm::vec3 diffuseAlbedo = albedo * (1.0f - metallic) * glm::clamp(opacity, 0.0f, 1.0f);
+    const glm::vec3 diffuseAlbedo = albedo * (1.0f - metallic);
     const glm::vec3 hemispheric = glm::mix(ambientGround, ambientSky, normal.y * 0.5f + 0.5f) * diffuseAlbedo
                                   * ambientOcclusion;
     glm::vec3       ambient     = hemispheric;
@@ -159,11 +160,11 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
 
     roughness = std::clamp(roughness, minimumRoughness, 1.0f);
 
-    const glm::vec3 view    = glm::normalize(cameraPosition - worldPosition);
+    const glm::vec3 view    = safeNormalize(cameraPosition - worldPosition);
     const float     nDotV   = std::max(glm::dot(normal, view), 1.0e-4f);
     const glm::vec3 f0      = glm::mix(dielectricF0, albedo, metallic);
     const float     invPi   = 1.0f / glm::pi<float>();
-    const glm::vec3 diffuse = albedo * ((1.0f - metallic) * invPi) * glm::clamp(opacity, 0.0f, 1.0f);
+    const glm::vec3 diffuse = albedo * ((1.0f - metallic) * invPi);
     // Fabric (cloth) shading, the twin of shaders/mesh.frag's shadeDirectLight:
     // sheenFactor > 0 blends the GGX specular toward the Charlie/Neubelt
     // fabric lobe (sheen highlight tinted toward the base color) and replaces
@@ -179,7 +180,7 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
     const float sunNDotL = std::max(glm::dot(normal, lightDirection), 0.0f);
     if (sunNDotL > 0.0f && (sunRadiance.x > 0.0f || sunRadiance.y > 0.0f || sunRadiance.z > 0.0f))
     {
-        const glm::vec3 halfVector = glm::normalize(view + lightDirection);
+        const glm::vec3 halfVector = safeNormalize(view + lightDirection);
         const float     nDotH      = std::max(glm::dot(normal, halfVector), 0.0f);
         const float     vDotH      = std::max(glm::dot(view, halfVector), 0.0f);
         const float     dTerm      = pbrDistributionGGX(nDotH, roughness);
@@ -215,7 +216,7 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
         {
             continue;
         }
-        const glm::vec3 halfVector = glm::normalize(view + localLightDirection);
+        const glm::vec3 halfVector = safeNormalize(view + localLightDirection);
         const float     nDotH      = std::max(glm::dot(normal, halfVector), 0.0f);
         const float     vDotH      = std::max(glm::dot(view, halfVector), 0.0f);
 

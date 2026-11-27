@@ -56,8 +56,11 @@ bool validateShape(const ShapeDescription &description)
 }
 
 // Closest point between the segments p1 + s * d1 (s in [0, 1]) and
-// p2 + t * d2 (t in [0, 1]); writes both points. For parallel segments the
-// first segment's start is used as the sample, which callers tolerate.
+// p2 + t * d2 (t in [0, 1]); writes both points. Parallel and collinear
+// segments (a capsule chain stacked end to end) resolve by evaluating the
+// four endpoint-projection candidates and keeping the closest pair - the
+// algebraic fallback of clamping a single parameter can pick opposite ends
+// and miss the contact entirely.
 void closestSegmentSegment(const math::Vec3 &p1, const math::Vec3 &d1, const math::Vec3 &p2, const math::Vec3 &d2,
     math::Vec3 &outPoint1, math::Vec3 &outPoint2)
 {
@@ -68,20 +71,49 @@ void closestSegmentSegment(const math::Vec3 &p1, const math::Vec3 &d1, const mat
     const double     c           = math::dot(d1, offset);
     const double     b           = math::dot(d1, d2);
     const double     denominator = a * e - b * b;
-    double           s           = denominator > kEpsilon ? std::clamp((b * f - c * e) / denominator, 0.0, 1.0) : 0.0;
-    double           t           = (b * s + f) / e;
-    if (t < 0.0)
+    if (denominator > kEpsilon * a * e)
     {
-        t = 0.0;
-        s = std::clamp(-c / a, 0.0, 1.0);
+        // Non-parallel: the standard two-segment closest-point solve.
+        double s           = std::clamp((b * f - c * e) / denominator, 0.0, 1.0);
+        double t           = (b * s + f) / e;
+        if (t < 0.0)
+        {
+            t = 0.0;
+            s = std::clamp(-c / a, 0.0, 1.0);
+        }
+        else if (t > 1.0)
+        {
+            t = 1.0;
+            s = std::clamp((b - c) / a, 0.0, 1.0);
+        }
+        outPoint1 = p1 + d1 * s;
+        outPoint2 = p2 + d2 * t;
+        return;
     }
-    else if (t > 1.0)
+    // Parallel or collinear: every point of one segment projects onto a
+    // range of the other, so the closest pair touches an endpoint of at
+    // least one segment. Evaluate the four endpoint projections and keep
+    // the closest pair.
+    const auto consider = [&](double s, double t)
     {
-        t = 1.0;
-        s = std::clamp((b - c) / a, 0.0, 1.0);
-    }
-    outPoint1 = p1 + d1 * s;
-    outPoint2 = p2 + d2 * t;
+        const math::Vec3 candidate1 = p1 + d1 * std::clamp(s, 0.0, 1.0);
+        const math::Vec3 candidate2 = p2 + d2 * std::clamp(t, 0.0, 1.0);
+        if (math::distanceSquared(candidate1, candidate2) < math::distanceSquared(outPoint1, outPoint2))
+        {
+            outPoint1 = candidate1;
+            outPoint2 = candidate2;
+        }
+    };
+    outPoint1 = p1;
+    outPoint2 = p2;
+    // Projection of p2's start onto segment 1: s = dot(p2 - p1, d1) / a.
+    consider(c / a, 0.0);
+    // Projection of p2's end onto segment 1: s = dot(p2 + d2 - p1, d1) / a.
+    consider((c + b) / a, 1.0);
+    // Projection of p1's start onto segment 2: t = dot(p1 - p2, d2) / e.
+    consider(0.0, -f / e);
+    // Projection of p1's end onto segment 2: t = dot(p1 + d1 - p2, d2) / e.
+    consider(1.0, (b - f) / e);
 }
 
 // Keeps the deepest maximumPoints contacts (most negative separation).
@@ -147,8 +179,13 @@ bool sphereSphere(const RigidTransform &transformA, double radiusA, const RigidT
     const math::Vec3 normal   = distance > kEpsilon ? delta * (1.0 / distance) : math::Vec3{0.0, 1.0, 0.0};
     manifold.normal           = normal;
     manifold.pointCount       = 0;
-    const math::Vec3 midpoint = transformB.position + normal * (radiusB - (combined - distance) * 0.5);
-    appendContact(manifold, midpoint, midpoint);
+    // Witness points on each sphere's surface so the solver's separation
+    // (dot(anchorA - anchorB, normal), negative while penetrating) measures
+    // the true signed gap: distance - (radiusA + radiusB). A shared midpoint
+    // would always report zero - no penetration to correct, no gap to close.
+    const math::Vec3 pointA = transformA.position - normal * radiusA;
+    const math::Vec3 pointB = transformB.position + normal * radiusB;
+    appendContact(manifold, pointA, pointB);
     return true;
 }
 
@@ -161,7 +198,6 @@ bool sphereBox(const RigidTransform &transformA, double radiusA, const RigidTran
         std::clamp(local.y, -halfExtents[1], halfExtents[1]),
         std::clamp(local.z, -halfExtents[2], halfExtents[2])};
     math::Vec3 localNormal;
-    double     depth = 0.0;
     math::Vec3 closestPointLocal;
     if (math::distanceSquared(local, clamped) <= kEpsilon * kEpsilon)
     {
@@ -178,7 +214,6 @@ bool sphereBox(const RigidTransform &transformA, double radiusA, const RigidTran
         }
         localNormal                           = math::Vec3{};
         math::component(localNormal, nearestAxis) = math::component(local, nearestAxis) >= 0.0 ? 1.0 : -1.0;
-        depth                                 = radiusA + faceDistances[nearestAxis];
         closestPointLocal                     = localNormal * halfExtents[nearestAxis];
     }
     else
@@ -191,13 +226,18 @@ bool sphereBox(const RigidTransform &transformA, double radiusA, const RigidTran
         }
         const double distance = std::sqrt(distanceSquared);
         localNormal           = distance > kEpsilon ? delta * (1.0 / distance) : math::Vec3{0.0, 1.0, 0.0};
-        depth                 = radiusA - distance;
         closestPointLocal     = clamped;
     }
     manifold.normal         = math::rotate(transformB.rotation, localNormal);
     manifold.pointCount     = 0;
+    // Witness points: the closest point on the box and the corresponding
+    // point on the sphere's surface, so the solver's separation measures the
+    // true signed gap (distance - radius, negative while penetrating, and
+    // radius + escape when the sphere's center is inside the box). Building
+    // the sphere's point as boxPoint + normal * depth instead would invert
+    // the sign (penetration reported as a gap and vice versa).
     const math::Vec3 pointB = transformB.position + math::rotate(transformB.rotation, closestPointLocal);
-    const math::Vec3 pointA = pointB + manifold.normal * depth;
+    const math::Vec3 pointA = transformA.position - manifold.normal * radiusA;
     appendContact(manifold, pointA, pointB);
     return true;
 }
@@ -249,14 +289,19 @@ bool boxBox(const RigidTransform &transformA, const double halfExtentsA[3], cons
     const math::Mat3 rotationB   = math::makeRotationMatrix(transformB.rotation);
     const math::Vec3 centerDelta = transformB.position - transformA.position;
 
+    // Face axes of each box in world space: the i-th column of the rotation
+    // matrix is the image of the box's local axis i, so axis i must read the
+    // stride-3 column elements (elements[row * 3 + axis]) rather than a
+    // contiguous row triple; a row triple would test the inversely rotated
+    // box instead.
     const math::Vec3 axesA[3]
-        = {math::Vec3{rotationA.elements[0], rotationA.elements[1], rotationA.elements[2]},
-            math::Vec3{rotationA.elements[3], rotationA.elements[4], rotationA.elements[5]},
-            math::Vec3{rotationA.elements[6], rotationA.elements[7], rotationA.elements[8]}};
+        = {math::Vec3{rotationA.elements[0], rotationA.elements[3], rotationA.elements[6]},
+            math::Vec3{rotationA.elements[1], rotationA.elements[4], rotationA.elements[7]},
+            math::Vec3{rotationA.elements[2], rotationA.elements[5], rotationA.elements[8]}};
     const math::Vec3 axesB[3]
-        = {math::Vec3{rotationB.elements[0], rotationB.elements[1], rotationB.elements[2]},
-            math::Vec3{rotationB.elements[3], rotationB.elements[4], rotationB.elements[5]},
-            math::Vec3{rotationB.elements[6], rotationB.elements[7], rotationB.elements[8]}};
+        = {math::Vec3{rotationB.elements[0], rotationB.elements[3], rotationB.elements[6]},
+            math::Vec3{rotationB.elements[1], rotationB.elements[4], rotationB.elements[7]},
+            math::Vec3{rotationB.elements[2], rotationB.elements[5], rotationB.elements[8]}};
 
     auto projectRadius = [](const math::Vec3 axes[3], const double extents[3], const math::Vec3 &axis)
     {
@@ -491,19 +536,24 @@ bool boxBox(const RigidTransform &transformA, const double halfExtentsA[3], cons
     return true;
 }
 
-// Samples the capsule segment as two interior spheres against the box; the
-// two-point manifolds keep lying capsules from rocking.
+// Samples the capsule's segment as three spheres - both END spheres and
+// the center - against the box. The end samples are exact for the capsule's
+// end caps (interior-only samples leave the outer half of each cap blind:
+// a capsule standing on its tip would never touch the box); the center
+// sample keeps small boxes that touch the middle cylinder discoverable.
+// The two-point manifold after the trim keeps lying capsules from rocking.
 bool boxCapsule(const RigidTransform &transformA, const double halfExtents[3], const RigidTransform &transformB,
     double radiusB, double halfLengthB, double margin, ContactManifold &manifold)
 {
     manifold.pointCount       = 0;
     manifold.normal           = math::Vec3{0.0, 1.0, 0.0};
     bool             touching = false;
-    const math::Vec3 halfAxis = math::rotate(transformB.rotation, math::Vec3{0.0, halfLengthB * 0.5, 0.0});
-    for (std::uint32_t sample = 0; sample < 2; ++sample)
+    const math::Vec3 axis     = math::rotate(transformB.rotation, math::Vec3{0.0, halfLengthB, 0.0});
+    const double     sampleOffsets[3] = {-halfLengthB, 0.0, halfLengthB};
+    for (const double offset : sampleOffsets)
     {
         RigidTransform sphereTransform{};
-        sphereTransform.position = transformB.position + (sample == 0 ? halfAxis * -1.0 : halfAxis);
+        sphereTransform.position = transformB.position + axis * (offset / halfLengthB);
         ContactManifold sampleManifold;
         if (sphereBox(sphereTransform, radiusB, transformA, halfExtents, margin, sampleManifold))
         {
@@ -578,7 +628,15 @@ bool capsulePlane(const RigidTransform &transformA, double radiusA, double halfL
         const double     signedDistance = math::dot(center, planeNormal) - planeOffset;
         if (signedDistance < radiusA + margin)
         {
-            appendContact(manifold, center - planeNormal * radiusA, center - planeNormal * std::min(signedDistance, 0.0));
+            // Witness points as spherePlane: the end sphere's surface point
+            // and the end center's projection onto the plane, so the
+            // separation measures the true signed gap (negative while
+            // penetrating, positive inside the speculative margin). The
+            // projection must stay unclamped: clamping the plane witness to
+            // the end center whenever the center sits above the plane would
+            // report the whole radius as penetration for every ordinary
+            // resting contact.
+            appendContact(manifold, center - planeNormal * radiusA, center - planeNormal * signedDistance);
         }
     }
     return manifold.pointCount > 0;
@@ -703,12 +761,11 @@ bool sphereCylinder(const RigidTransform &transformA, double radiusA, const Rigi
     bool             inside  = false;
     const math::Vec3 closest = closestPointOnSolidCylinderLocal(local, radiusB, halfHeightB, inside);
     math::Vec3       localNormal;
-    double           depth        = 0.0;
     math::Vec3       surfaceLocal;
     if (inside)
     {
+        // The witness on the cylinder is the escape point on its surface.
         const double escape = insideSolidCylinderEscape(local, radiusB, halfHeightB, localNormal);
-        depth               = radiusA + escape;
         surfaceLocal        = local + localNormal * escape;
     }
     else
@@ -721,13 +778,15 @@ bool sphereCylinder(const RigidTransform &transformA, double radiusA, const Rigi
         }
         const double distance = std::sqrt(distanceSquared);
         localNormal           = distance > kEpsilon ? delta * (1.0 / distance) : math::Vec3{0.0, 1.0, 0.0};
-        depth                 = radiusA - distance;
         surfaceLocal          = closest;
     }
     manifold.normal         = math::rotate(transformB.rotation, localNormal);
     manifold.pointCount     = 0;
+    // Witness points: the closest point on the cylinder and the point on the
+    // sphere's surface (same convention as sphereBox - the separation must
+    // measure the true signed gap, negative while penetrating).
     const math::Vec3 pointB = transformB.position + math::rotate(transformB.rotation, surfaceLocal);
-    const math::Vec3 pointA = pointB + manifold.normal * depth;
+    const math::Vec3 pointA = transformA.position - manifold.normal * radiusA;
     appendContact(manifold, pointA, pointB);
     return true;
 }
@@ -849,19 +908,21 @@ bool boxCylinder(const RigidTransform &transformA, const double halfExtents[3], 
     return true;
 }
 
-// Capsule against solid cylinder: the capsule's two interior spheres are
-// tested against the cylinder (the sampled-sphere idiom of boxCapsule).
+// Capsule against solid cylinder: the capsule's segment is sampled as both
+// END spheres plus the center (the same end-inclusive sampling as
+// boxCapsule) and each sample is tested against the cylinder.
 bool capsuleCylinder(const RigidTransform &transformA, double radiusA, double halfLengthA,
     const RigidTransform &transformB, double radiusB, double halfHeightB, double margin, ContactManifold &manifold)
 {
     manifold.pointCount       = 0;
     manifold.normal           = math::Vec3{0.0, 1.0, 0.0};
     bool             touching = false;
-    const math::Vec3 halfAxis = math::rotate(transformA.rotation, math::Vec3{0.0, halfLengthA * 0.5, 0.0});
-    for (std::uint32_t sample = 0; sample < 2; ++sample)
+    const math::Vec3 axis     = math::rotate(transformA.rotation, math::Vec3{0.0, halfLengthA, 0.0});
+    const double     sampleOffsets[3] = {-halfLengthA, 0.0, halfLengthA};
+    for (const double offset : sampleOffsets)
     {
         RigidTransform   sphereTransform{};
-        sphereTransform.position = transformA.position + (sample == 0 ? halfAxis * -1.0 : halfAxis);
+        sphereTransform.position = transformA.position + axis * (offset / halfLengthA);
         ContactManifold sampleManifold;
         if (sphereCylinder(sphereTransform, radiusA, transformB, radiusB, halfHeightB, margin, sampleManifold))
         {
@@ -1124,18 +1185,22 @@ void computeShapeAabb(
     }
     case ShapeKind::Box: {
         const math::Mat3 rotation = math::makeRotationMatrix(transform.rotation);
-        const math::Vec3 extentColumn{
+        // Support-function AABB: the extent along world axis i is the sum of
+        // the projected half extents, which reads ROW i of the rotation
+        // matrix (elements[i * 3 + j]); the previous column-major read
+        // transposed the box for every off-axis rotation.
+        const math::Vec3 extent{
             std::abs(rotation.elements[0]) * shape.boxHalfExtents[0]
-                + std::abs(rotation.elements[3]) * shape.boxHalfExtents[1]
-                + std::abs(rotation.elements[6]) * shape.boxHalfExtents[2],
-            std::abs(rotation.elements[1]) * shape.boxHalfExtents[0]
+                + std::abs(rotation.elements[1]) * shape.boxHalfExtents[1]
+                + std::abs(rotation.elements[2]) * shape.boxHalfExtents[2],
+            std::abs(rotation.elements[3]) * shape.boxHalfExtents[0]
                 + std::abs(rotation.elements[4]) * shape.boxHalfExtents[1]
-                + std::abs(rotation.elements[7]) * shape.boxHalfExtents[2],
-            std::abs(rotation.elements[2]) * shape.boxHalfExtents[0]
-                + std::abs(rotation.elements[5]) * shape.boxHalfExtents[1]
+                + std::abs(rotation.elements[5]) * shape.boxHalfExtents[2],
+            std::abs(rotation.elements[6]) * shape.boxHalfExtents[0]
+                + std::abs(rotation.elements[7]) * shape.boxHalfExtents[1]
                 + std::abs(rotation.elements[8]) * shape.boxHalfExtents[2]};
-        outMinimum = transform.position - extentColumn;
-        outMaximum = transform.position + extentColumn;
+        outMinimum = transform.position - extent;
+        outMaximum = transform.position + extent;
         break;
     }
     case ShapeKind::Capsule: {
@@ -1156,10 +1221,16 @@ void computeShapeAabb(
     case ShapeKind::Cylinder: {
         // Support-function AABB: along each world axis the extent is the
         // half-height projected on the axis plus the cap-disc radius in the
-        // perpendicular plane, which is exact for a rotated cylinder.
-        const math::Vec3 axis = math::rotate(transform.rotation, math::Vec3{0.0, shape.cylinderHalfHeight, 0.0});
-        math::Vec3       extent;
-        const double     components[3] = {axis.x, axis.y, axis.z};
+        // perpendicular plane, which is exact for a rotated cylinder. The
+        // projection needs the UNIT axis: the rotated local +Y half-height
+        // vector has length h, and feeding its raw components would scale
+        // the axial term by h and shrink the cap term for any h != 1.
+        const math::Vec3 axis       = math::rotate(transform.rotation, math::Vec3{0.0, shape.cylinderHalfHeight, 0.0});
+        const double     axisLength = math::length(axis);
+        const math::Vec3 unitAxis
+            = axisLength > kEpsilon ? axis * (1.0 / axisLength) : math::Vec3{0.0, 1.0, 0.0};
+        math::Vec3   extent;
+        const double components[3] = {unitAxis.x, unitAxis.y, unitAxis.z};
         for (std::uint32_t axisIndex = 0; axisIndex < 3; ++axisIndex)
         {
             const double axial       = components[axisIndex];
@@ -1651,9 +1722,11 @@ bool collideSphereSolid(const math::Vec3 &center, double radius, const Shape &so
             return false;
         }
         // The manifold normal already runs box-to-sphere: the push-out
-        // direction for the query sphere.
+        // direction for the query sphere. The witness points now measure the
+        // signed gap (negative while penetrating), so the penetration depth
+        // is the negated separation.
         outNormal = manifold.normal;
-        outDepth  = math::dot(manifold.points[0].pointA - manifold.points[0].pointB, manifold.normal);
+        outDepth  = -math::dot(manifold.points[0].pointA - manifold.points[0].pointB, manifold.normal);
         return outDepth > 0.0;
     }
     case ShapeKind::Capsule: {

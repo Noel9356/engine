@@ -26,7 +26,9 @@ enum class AliasingStrategy : std::uint8_t
     WorstFit
 };
 
-// Inputs to the allocator. budgetBytes == 0 disables the budget check.
+// Inputs to the allocator. A zero budgetBytes admits nothing: every
+// non-zero-size allocation reports BudgetExceeded (set aliasingEnabled off
+// to skip slot assignment entirely).
 struct AliasingConfig
 {
     bool            aliasingEnabled             = true;

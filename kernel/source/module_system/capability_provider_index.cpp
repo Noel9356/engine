@@ -135,10 +135,13 @@ void *CapabilityProviderIndex::resolveCapabilityPointer(
     }
 
     // Family fallback: exactly one member implementation resolves to its
-    // concrete (dotted) capability.
+    // concrete (dotted) capability. The pair is copied out before the call:
+    // the participant code behind capabilityPointerOf may re-enter
+    // resolution, and providers (the shared scratch set while unfrozen)
+    // would be cleared and refilled under the reference.
     if (providers.memberProviders.size() == 1) [[likely]]
     {
-        const auto &member = providers.memberProviders.front();
+        const auto member = providers.memberProviders.front();
         if (isVisibleTo(*member.first, requesterKind))
         {
             return capabilityPointerOf(*member.first, member.second);
@@ -211,31 +214,28 @@ void *CapabilityProviderIndex::resolveCapabilityPointer(
                              "requirement whose provider is available in this run");
 }
 
-// Visibility-aware unambiguity check (used by isCapabilityAvailable).
+// Visibility-aware unambiguity check (used by isCapabilityAvailable). Same
+// precedence as the resolve paths: visible exact matches first, family
+// members only when no visible exact provider exists - a probe that answers
+// "unavailable" while tryResolveCapabilityPointer hands out a family
+// member's implementation would let consumers silently skip functionality
+// they could have acquired.
 bool CapabilityProviderIndex::hasSingleCapabilityProvider(
     const std::string &capabilityName, ParticipantKind requesterKind)
 {
-    const ProviderSet &providers       = providerSetFor(capabilityName);
-    const bool         moduleRequester = requesterKind == ParticipantKind::EngineModule;
-    if (!providers.exactProviders.empty())
+    const ProviderSet &providers = providerSetFor(capabilityName);
+
+    std::size_t visibleExact = 0;
+    for (const CapabilityProviderEntry *provider : providers.exactProviders)
     {
-        if (!moduleRequester)
+        if (isVisibleTo(*provider, requesterKind))
         {
-            return providers.exactProviders.size() == 1;
+            ++visibleExact;
         }
-        std::size_t visibleCount = 0;
-        for (const CapabilityProviderEntry *provider : providers.exactProviders)
-        {
-            if (isVisibleTo(*provider, requesterKind))
-            {
-                ++visibleCount;
-            }
-        }
-        return visibleCount == 1;
     }
-    if (!moduleRequester)
+    if (visibleExact != 0)
     {
-        return providers.memberProviders.size() == 1;
+        return visibleExact == 1;
     }
     std::size_t visibleMembers = 0;
     for (const auto &member : providers.memberProviders)
@@ -296,7 +296,14 @@ void *CapabilityProviderIndex::tryResolveCapabilityPointer(
 std::vector<void *> CapabilityProviderIndex::resolveEachCapabilityPointer(
     ParticipantKind requesterKind, const std::string &capabilityName)
 {
-    const ProviderSet &providers = providerSetFor(capabilityName);
+    // Copy the classification before invoking any participant code: a
+    // provider's capabilityPointerFor may re-enter resolution (lazy
+    // initialization acquiring another capability), and providerSetFor
+    // hands out the shared scratch set while the index is not frozen - or a
+    // reference into index_, which the re-entrant call can grow past with a
+    // push_back - either of which would leave the loops below iterating
+    // freed storage. The copy is two small vectors next to a virtual call.
+    const ProviderSet providers = providerSetFor(capabilityName);
 
     std::vector<void *> pointers;
     if (!providers.exactProviders.empty())

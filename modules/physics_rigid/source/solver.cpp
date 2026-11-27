@@ -220,16 +220,23 @@ void prepareContactConstraints(World &world, const StepContext &context, std::ve
                 point.rollingRadius     = std::max(bodyA.rollingRadius, bodyB.rollingRadius);
             }
 
-            // The velocity solve targets restitution plus the speculative
-            // gap: a positive separation must close within this step, which
-            // stops approaching bodies before they touch and removes impact
-            // overshoot. Penetration itself is the position solver's job.
+            // The velocity solve's normal row is one-sided (separating speed
+            // may only be pushed up to the target), so the target decides
+            // which behavior wins for a positive separation: the target is
+            // the gap-closing rate -separation / dt, the approach speed that
+            // lands the pair exactly touching at the step's end. The bounce
+            // target only applies while the bodies actually touch
+            // (separation <= 0); taking the maximum of the two would always
+            // pick the nonnegative restitution velocity, so a positive gap
+            // could never close and a restitution-free body would levitate
+            // at the speculative margin. Penetration itself is the position
+            // solver's job.
             const math::Vec3 relativeVelocity = velocityAt(bodyA, point.rA) - velocityAt(bodyB, point.rB);
             const double     separatingSpeed  = math::dot(relativeVelocity, point.normal);
             point.restitutionVelocity
                 = separatingSpeed < -settings.restitutionVelocityThreshold ? -restitution * separatingSpeed : 0.0;
             point.speculativeTarget = point.separation > 0.0
-                                        ? std::max(point.restitutionVelocity, -point.separation / context.deltaTime)
+                                        ? -point.separation / context.deltaTime
                                         : point.restitutionVelocity;
 
             point.normalMass   = effectiveMass(constraint.inverseInertiaA,
@@ -291,9 +298,13 @@ void prepareJointConstraints(World &world, const StepContext &context, std::vect
 
         JointConstraint constraint;
         // Limit rows restart every step (no warm start): clear their
-        // accumulators so stale impulses never leak into a new solve.
+        // accumulators so stale impulses never leak into a new solve. The
+        // prismatic translation limit row joins the hinge and ball-socket
+        // limit rows here - a one-sided accumulator carried across steps
+        // (and re-applied by the warm start) pumps energy into the joint.
         joint.limitImpulse      = 0.0;
         joint.swingLimitImpulse = 0.0;
+        joint.sliderLimitImpulse = 0.0;
         constraint.bodyIndexA      = indexA;
         constraint.bodyIndexB      = indexB;
         constraint.jointIndex      = jointIndex;
@@ -537,16 +548,11 @@ void warmStartJoints(World &world, std::vector<JointConstraint> &constraints, bo
                 constraint.inverseInertiaB,
                 constraint.sliderAxisWorld,
                 joint.prismaticTwistImpulse);
-            if (joint.description.limitsEnabled)
-            {
-                applyPairImpulse(bodyA,
-                    bodyB,
-                    constraint.inverseInertiaA,
-                    constraint.inverseInertiaB,
-                    constraint.rA,
-                    constraint.rB,
-                    constraint.sliderAxisWorld * joint.sliderLimitImpulse);
-            }
+            // The translation limit row is not warm started, exactly like
+            // the hinge and ball-socket limit rows below: a limit impulse is
+            // discontinuous at the boundary, and re-applying a stale one
+            // pumps energy into the joint. The solve rebuilds it from
+            // scratch each step (its accumulator is cleared in prepare).
             if (joint.description.motorEnabled)
             {
                 applyPairImpulse(bodyA,
@@ -599,20 +605,19 @@ void warmStartJoints(World &world, std::vector<JointConstraint> &constraints, bo
                     constraint.inverseInertiaB,
                     constraint.antiSwingBasis[1],
                     joint.antiSwingImpulse2);
-                // Limit rows are not warm started: their impulses are
-                // discontinuous at the boundary and their axes rotate with
-                // the bodies, so re-applying a stale limit impulse pumps
-                // energy into chattering joints. The solve recomputes them
-                // from scratch each step.
-                if (joint.description.motorEnabled)
-                {
-                    applyAngularPairImpulse(bodyA,
-                        bodyB,
-                        constraint.inverseInertiaA,
-                        constraint.inverseInertiaB,
-                        constraint.hingeAxisWorld,
-                        joint.motorImpulse);
-                }
+            }
+            // The motor row is continuous (a clamped velocity tracker, not a
+            // one-sided boundary row), so its accumulated impulse warm
+            // starts for hinges and ball-socket twists alike, about the
+            // same axisLocalA both joints measure their twist state with.
+            if (joint.description.motorEnabled)
+            {
+                applyAngularPairImpulse(bodyA,
+                    bodyB,
+                    constraint.inverseInertiaA,
+                    constraint.inverseInertiaB,
+                    constraint.hingeAxisWorld,
+                    joint.motorImpulse);
             }
             break;
         }
@@ -669,9 +674,17 @@ void solveContactVelocityIteration(
                 const math::Vec3 relativeVelocity = velocityAt(bodyA, point.rA) - velocityAt(bodyB, point.rB);
                 const double     slidingSpeed     = math::dot(relativeVelocity, tangent);
                 double           impulseLambda    = -tangentMass * slidingSpeed;
-                const double     maximum          = point.friction * persisted.normalImpulse;
-                const double     oldImpulse       = accumulatedImpulse;
-                const double     newImpulse       = std::clamp(oldImpulse + impulseLambda, -maximum, maximum);
+                // The cone bound follows the COMPRESSIVE load only: the
+                // speculative-contact scheme lets the accumulated normal
+                // impulse go negative (the attractive gap-closing floor), and
+                // scaling the friction bound by a negative impulse would
+                // invert the clamp's bounds (lo > hi, undefined behaviour)
+                // and pin friction to a wrong-sign, energy-injecting impulse.
+                // The rolling-resistance budget below already guards the same
+                // case with its positive-budget check.
+                const double maximum    = point.friction * std::max(persisted.normalImpulse, 0.0);
+                const double oldImpulse = accumulatedImpulse;
+                const double newImpulse = std::clamp(oldImpulse + impulseLambda, -maximum, maximum);
                 impulseLambda                     = newImpulse - oldImpulse;
                 accumulatedImpulse                = newImpulse;
                 applyPairImpulse(bodyA,
@@ -1141,6 +1154,28 @@ void solveJointVelocityIteration(
                     joint.limitImpulse = 0.0;
                 }
             }
+        }
+
+        // Twist motor: the hinge's motor row about the same axisLocalA the
+        // ball-socket's twist limit measures, so a drive powers the twist
+        // component while swing stays limit-controlled.
+        if (constraint.kind == JointKind::BallSocket && joint.description.motorEnabled && constraint.motorMass > 0.0)
+        {
+            const double relativeSpeed
+                = math::dot(bodyB.angularVelocity - bodyA.angularVelocity, constraint.hingeAxisWorld);
+            const double speedError     = relativeSpeed - joint.description.motorTargetVelocity;
+            double       impulseLambda  = -constraint.motorMass * speedError;
+            const double maximumImpulse = joint.description.maximumMotorTorque * context.deltaTime;
+            const double oldImpulse     = joint.motorImpulse;
+            const double newImpulse     = std::clamp(oldImpulse + impulseLambda, -maximumImpulse, maximumImpulse);
+            impulseLambda               = newImpulse - oldImpulse;
+            joint.motorImpulse          = newImpulse;
+            applyAngularPairImpulse(bodyA,
+                bodyB,
+                constraint.inverseInertiaA,
+                constraint.inverseInertiaB,
+                constraint.hingeAxisWorld,
+                impulseLambda);
         }
     }
 }

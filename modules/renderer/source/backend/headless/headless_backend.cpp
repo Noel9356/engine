@@ -7,6 +7,7 @@
 // blitted into the window module's locked surface pixels.
 
 #include "headless_backend.hpp"
+#include "finite_math.hpp"
 #include "mottle_noise.hpp"
 #include "quad_shading.hpp"
 #include "render_shared.hpp"
@@ -44,6 +45,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <optional>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -93,6 +95,65 @@ inline FurDisplacedVertex furDisplaceVertex(const glm::vec3 &position, const glm
 bool transformMatricesEqual(const glm::mat4 &a, const glm::mat4 &b)
 {
     return std::memcmp(&a, &b, sizeof(glm::mat4)) == 0;
+}
+
+// RAII acquire of one pixel-group spin lock (see HeadlessBackend::pixelLocks).
+// The triangle-range parallel path assigns workers disjoint triangle ranges,
+// not disjoint pixels, so every commit that reads and writes a pixel - the
+// opaque depth-test/store pair AND the transparent/fur read-modify-write
+// blends - must hold the group lock or two workers covering the same pixel
+// interleave (a lost blend, or bytes from two blends mixed).
+class PixelGroupLock final
+{
+public:
+    explicit PixelGroupLock(std::uint8_t &lockByte)
+        : lock_(lockByte)
+    {
+        std::uint8_t expected = 0;
+        while (!lock_.compare_exchange_weak(expected, 1, std::memory_order_acquire, std::memory_order_relaxed))
+        {
+            expected = 0;
+        }
+    }
+
+    ~PixelGroupLock()
+    {
+        lock_.store(0, std::memory_order_release);
+    }
+
+    PixelGroupLock(const PixelGroupLock &)            = delete;
+    PixelGroupLock &operator=(const PixelGroupLock &) = delete;
+
+private:
+    std::atomic_ref<std::uint8_t> lock_;
+};
+
+// Top-left fill rule (the convention every GPU rasterizer applies): a pixel
+// whose center lies exactly on a triangle edge belongs to exactly ONE of the
+// two triangles sharing it. Alpha-blended draws have no depth re-test to
+// mask a duplicate commit, so without the rule their shared edges blend
+// twice (a visible bright seam through every transparent quad and fur
+// shell). The boundary belongs to this triangle when the edge, traversed in
+// the triangle's own corner order, points down the screen (dy > 0) or right
+// when exactly horizontal (dy == 0 && dx > 0); a consistently-wound
+// neighbour traverses the shared edge in the opposite direction and can
+// therefore never claim it as well, and the fan decomposition (0, k, k+1)
+// traverses its internal spokes in opposite directions too, so neither
+// holes nor double coverage can result.
+inline bool edgeAcceptsBoundary(float edgeDx, float edgeDy)
+{
+    return edgeDy > 0.0f || (edgeDy == 0.0f && edgeDx > 0.0f);
+}
+
+// The three coverage edges' boundary-accept bits for a triangle given in
+// corner order (A, B, C): bit0 = the edge opposite A (B -> C, where the
+// barycentric weight of A is zero), bit1 = C -> A, bit2 = A -> B.
+inline std::uint8_t fillRuleBitsFor(float ax, float ay, float bx, float by, float cx, float cy)
+{
+    const std::uint8_t bitA = edgeAcceptsBoundary(cx - bx, cy - by) ? 1u : 0u;
+    const std::uint8_t bitB = edgeAcceptsBoundary(ax - cx, ay - cy) ? 2u : 0u;
+    const std::uint8_t bitC = edgeAcceptsBoundary(bx - ax, by - ay) ? 4u : 0u;
+    return bitA | bitB | bitC;
 }
 
 // Sutherland-Hodgman clip of one polygon against a single half-plane given
@@ -209,6 +270,17 @@ void HeadlessBackend::setDirectLights(const direct_lighting::DirectLight *lights
 // data short-circuits, which also keeps the frustum stable.
 void HeadlessBackend::setCamera(const CameraMatrices &camera)
 {
+    // A non-finite camera (a divide-by-zero aspect, a broken animation
+    // feeding NaN into a view) would poison every later projection and turn
+    // the per-fan pixel windows into whole-framebuffer scans. The last
+    // valid camera stays in place instead - the same rule the rasterizer's
+    // per-draw finiteness gate applies. Bit-level test: this unit compiles
+    // with -ffast-math, where std::isfinite folds to constant true.
+    if (!isFiniteRange(camera.projection, 16u) || !isFiniteRange(camera.view, 16u)
+        || !isFiniteRange(camera.position, 3u))
+    {
+        return;
+    }
     if (cameraInitialized_ && std::memcmp(&camera_, &camera, sizeof(CameraMatrices)) == 0)
     {
         return;
@@ -226,7 +298,7 @@ void HeadlessBackend::setCamera(const CameraMatrices &camera)
     for (glm::vec4 &plane : frustumPlanes_)
     {
         const float length = glm::length(glm::vec3(plane));
-        if (std::isfinite(length) && length > 1e-8f)
+        if (isFinite(length) && length > 1e-8f)
         {
             plane /= length;
         }
@@ -244,6 +316,14 @@ void HeadlessBackend::setCamera(const CameraMatrices &camera)
 
 void HeadlessBackend::beginFrame(const FrameParameters &frame)
 {
+    // Shadow casters reset FIRST, before any early return can bail out (a
+    // 0x0 surface from a minimized window must not accumulate casters across
+    // frames; every early return below skips the tail of this function):
+    // the list starts empty so the endFrame build hashes exactly what this
+    // frame drew, and the capacity survives for allocation-free steady
+    // states.
+    sunShadowCasters_.clear();
+
     std::uint32_t width  = viewportWidth;
     std::uint32_t height = viewportHeight;
     if (width == 0 || height == 0)
@@ -375,11 +455,6 @@ void HeadlessBackend::beginFrame(const FrameParameters &frame)
     }
 
     std::fill(pixelLocks.begin(), pixelLocks.end(), 0);
-
-    // Shadow casters accumulate per frame (see sun_shadows.hpp): the list
-    // starts empty so the endFrame build hashes exactly what this frame
-    // drew, and the capacity survives for allocation-free steady states.
-    sunShadowCasters_.clear();
 }
 
 // Presents: copies the CPU raster into the window surface's locked pixel
@@ -398,6 +473,19 @@ void HeadlessBackend::endFrame()
     }
     const std::uint32_t rows    = std::min(framebufferHeight, pixels.height);
     const std::uint32_t columns = std::min(framebufferWidth, pixels.width);
+    // Presentation pass bounds: with supersampling the resolve below writes
+    // output-space rows/columns (the sample bounds divided by the sample
+    // scale), and the bloom / film AA / camera response passes must stop
+    // exactly there - the sample-space rows/columns above are larger, so
+    // feeding them would run the passes over stale surface rows the resolve
+    // never wrote this frame.
+    const bool           supersampled    = sampleScaleX_ != 1u || sampleScaleY_ != 1u;
+    const std::uint32_t presentRows    = supersampled
+        ? std::min(framebufferHeight / sampleScaleY_, pixels.height)
+        : rows;
+    const std::uint32_t presentColumns = supersampled
+        ? std::min(framebufferWidth / sampleScaleX_, pixels.width)
+        : columns;
     if (sampleScaleX_ == 1u && sampleScaleY_ == 1u)
     {
         if (rows == framebufferHeight && columns == framebufferWidth
@@ -436,6 +524,9 @@ void HeadlessBackend::endFrame()
         case 8u: sampleShift = 3u; sampleCountIsPowerOfTwo = true; break;
         default: sampleCountIsPowerOfTwo = false; break;
         }
+        // Per-frame tent gate: the configured flag, minus a failed scratch
+        // growth this frame (the box resolve below is the fallback).
+        bool resolveTentThisFrame = resolveTent_;
         const auto resolveRows = [&](std::uint32_t rowBegin, std::uint32_t rowEnd, std::uint32_t bandIndex)
         {
             // Tent resolve (renderer.headless_resolve_tent, the default):
@@ -449,7 +540,7 @@ void HeadlessBackend::endFrame()
             // optical low-pass filter does, before the film blend sees it.
             // Each band works on its own scratch slice (bands run
             // concurrently).
-            if (resolveTent_)
+            if (resolveTentThisFrame)
             {
                 resolveRowsTent(color.data(), framebufferWidth, pixels, outputColumns, outputRows, rowBegin,
                     rowEnd, tentRowSums_.data() + static_cast<std::size_t>(bandIndex) * outputColumns * 4u * 6u);
@@ -578,13 +669,25 @@ void HeadlessBackend::endFrame()
         // workers below index their own slice): three rows of raw block sums
         // plus their three horizontally folded rows, per band.
         std::size_t tentBandStride = 0;
-        if (resolveTent_)
+        if (resolveTentThisFrame)
         {
             tentBandStride = static_cast<std::size_t>(outputColumns) * 4u * 6u;
             const std::size_t tentTotal = tentBandStride * (parallelWorkerCount() + 1u);
             if (tentRowSums_.size() < tentTotal)
             {
-                tentRowSums_.assign(tentTotal, 0);
+                // A failed growth falls back to this frame's box resolve:
+                // the resolve output stays valid, just without the tent's
+                // softening (an allocation failure must not escape endFrame
+                // into the application).
+                try
+                {
+                    tentRowSums_.assign(tentTotal, 0);
+                }
+                catch (const std::bad_alloc &)
+                {
+                    tentRowSums_.clear();
+                    resolveTentThisFrame = false;
+                }
             }
         }
         (void)tentBandStride; // the resolve lambda slices by band index itself
@@ -625,26 +728,27 @@ void HeadlessBackend::endFrame()
     // adds the weighted glare back before the surface unlocks. The whole
     // pass reads and writes the same locked rows, so it serializes cleanly
     // after the resolve bands.
-    if (bloomEnabled_ && bloomStrength_ > 0.0f && columns > 8u && rows > 8u)
+    if (bloomEnabled_ && bloomStrength_ > 0.0f && presentColumns > 8u && presentRows > 8u)
     {
-        applyPresentationBloom(pixels, columns, rows);
+        applyPresentationBloom(pixels, presentColumns, presentRows);
     }
     // Film antialiasing (renderer.film_aa): the luminance-directed edge
     // blend over the finished, bloomed rows - the rasterizer's screen-space
     // diagonal staircase smoothed before the camera response layers the
     // contrast curve, the lens falloff, and the grain on top.
-    if (filmAA_ && columns > 4u && rows > 4u)
+    if (filmAA_ && presentColumns > 4u && presentRows > 4u)
     {
-        applyFilmAntialias(pixels, columns, rows);
+        applyFilmAntialias(pixels, presentColumns, presentRows);
     }
     // Camera response (renderer.contrast / vignette / grain): the
     // photographic layer over the finished, bloomed output - the contrast
     // pivot curve, the radial lens falloff, and deterministic sensor grain,
     // decoded to linear and re-encoded through the shared byte table. Runs
     // after the bloom so the glare carries the same lens response.
-    if ((cameraContrast_ != 1.0f || cameraVignette_ > 0.0f || cameraGrain_ > 0.0f) && columns > 1u && rows > 1u)
+    if ((cameraContrast_ != 1.0f || cameraVignette_ > 0.0f || cameraGrain_ > 0.0f) && presentColumns > 1u
+        && presentRows > 1u)
     {
-        applyCameraResponse(pixels, columns, rows);
+        applyCameraResponse(pixels, presentColumns, presentRows);
     }
     // Sun shadow map rebuild (renderer.sun_shadows): the casters recorded by
     // this frame's draws rasterize into the map the NEXT frame shades
@@ -1090,6 +1194,9 @@ void HeadlessBackend::applyCameraResponse(const window::SurfacePixels &pixels, s
     // Contrast pivot: the sRGB mid-gray linear value (0.18), the exposure
     // midpoint every tone curve pivots around.
     constexpr float kPivot = 0.18f;
+#if !ENGINE_WIDE_SHADING_AVX512
+    (void)kPivot; // the wide pass below is its only reader in this build
+#endif
     const std::uint32_t frameSeed = static_cast<std::uint32_t>(statistics_.framesRendered);
 
     const auto processRows = [&](std::uint32_t rowBegin, std::uint32_t rowEnd)
@@ -1102,6 +1209,9 @@ void HeadlessBackend::applyCameraResponse(const window::SurfacePixels &pixels, s
         // loop computes them per pixel, with the same hash inputs, so a wide
         // lane writes the byte the scalar loop would write for that pixel.
         const bool wideCamera = wideRunsActive_;
+#if !ENGINE_WIDE_SHADING_AVX512
+        (void)wideCamera; // the wide pass below is its only reader in this build
+#endif
         for (std::uint32_t y = rowBegin; y < rowEnd; ++y)
         {
             std::uint8_t *row = pixels.rgba + static_cast<std::size_t>(y) * pixels.strideBytes;
@@ -1167,10 +1277,8 @@ void HeadlessBackend::applyCameraResponse(const window::SurfacePixels &pixels, s
                     // Contrast pivot as slope/intercept; the grain's gain
                     // rides the same multiply (the scalar path applies it to
                     // the contrasted value, and slope*(x)+i then *gain equals
-                    // the scalar's ((x-p)*c+p)*g - the distributions match
-                    // because both are affine in the decoded value; the
-                    // clamp the scalar path takes between contrast and grain
-                    // is folded by the kernel's own final clamp).
+                    // the scalar's ((x-p)*c+p)*g on the clamped operand; the
+                    // clamp between contrast and gain lives in the kernel).
                     for (int channel = 0; channel < 3; ++channel)
                     {
                         const __m512 processed = widepresentation::cameraResponseWide(decode.data(),
@@ -1310,12 +1418,16 @@ void HeadlessBackend::resolveRowsTent(const std::uint8_t *samples, std::uint32_t
     const auto foldRowHorizontally = [outputColumns, this](const std::uint16_t *sums, std::uint16_t *folded)
     {
 #if ENGINE_WIDE_SHADING_AVX512
-        if (wideRunsActive_)
+        if (wideRunsActive_ && outputColumns >= 2u)
         {
             widepresentation::tentFoldRowWide(sums, folded, outputColumns);
             return;
         }
 #endif // ENGINE_WIDE_SHADING_AVX512
+        // Degenerate rows (fewer than two output columns) stay scalar: the
+        // wide fold covers the interior columns between two edge-clamped
+        // ones, so a single-column row would commit whatever the scratch
+        // held instead of the folded sums.
         for (std::uint32_t x = 0; x < outputColumns; ++x)
         {
             const std::size_t west = static_cast<std::size_t>(x > 0u ? x - 1u : 0u) * 4u;
@@ -1644,6 +1756,16 @@ void HeadlessBackend::recordSunShadowCaster(MeshHandle mesh, const float *modelM
     {
         return;
     }
+    // A non-finite transform never rasterizes (prepareRasterization rejects
+    // the draw), so it must not become a caster either: the geometry list's
+    // bounds filtering and the rasterizer's projection guard would catch it
+    // later, but the caster list itself stays clean only if the same draw
+    // filter applies at recording. Bit-level test: this unit compiles with
+    // -ffast-math, where std::isfinite folds to constant true.
+    if (!isFiniteRange(modelMatrix, 16u))
+    {
+        return;
+    }
     if (material.unlit || material.opacity < 0.999f)
     {
         return;
@@ -1678,6 +1800,19 @@ std::uint64_t HeadlessBackend::sunShadowCastersHash() const
     for (const sunshadows::SunShadowCaster &caster : sunShadowCasters_)
     {
         hash ^= caster.mesh;
+        hash *= 0x00000100000001B3ull;
+        // The caster's geometry generation, not just its (mesh, transform)
+        // pair: updateMeshVertices replaces a mesh's positions without
+        // touching the transform, and a hash over the pair alone would keep
+        // the shadow map frozen at the pre-deformation pose (the static-scene
+        // skip is only valid while the geometry itself is static). A mesh
+        // destroyed between the draw and this build hashes as revision 0, so
+        // its disappearance changes the hash and the map rebuilds without it -
+        // exactly what the geometry list's own drop asks for.
+        const auto meshEntry = meshes.find(caster.mesh);
+        const std::uint64_t geometryRevision
+            = meshEntry != meshes.end() ? meshEntry->second.geometryRevision : 0u;
+        hash ^= geometryRevision;
         hash *= 0x00000100000001B3ull;
         hash = mix(hash, caster.transform, 16);
     }
@@ -1762,7 +1897,7 @@ std::vector<sunshadows::SunShadowGeometry> HeadlessBackend::sunShadowGeometries(
                 }
             }
         }
-        if (mesh.boundsValid && std::isfinite(geometry.worldBoundsMin.x) && std::isfinite(geometry.worldBoundsMax.x))
+        if (mesh.boundsValid && isFinite(geometry.worldBoundsMin.x) && isFinite(geometry.worldBoundsMax.x))
         {
             geometries.push_back(geometry);
         }
@@ -1784,7 +1919,7 @@ void HeadlessBackend::sunShadowReceiverBox(glm::vec3 &receiverMin, glm::vec3 &re
         return;
     }
     const glm::mat4 inverseViewProjection = glm::inverse(viewProjection_);
-    if (!std::isfinite(inverseViewProjection[0][0]))
+    if (!isFinite(inverseViewProjection[0][0]))
     {
         return;
     }
@@ -1816,7 +1951,7 @@ void HeadlessBackend::sunShadowReceiverBox(glm::vec3 &receiverMin, glm::vec3 &re
         receiverMin = glm::min(receiverMin, corners[index]);
         receiverMax = glm::max(receiverMax, corners[index]);
     }
-    haveBox = std::isfinite(receiverMin.x) && std::isfinite(receiverMax.x);
+    haveBox = isFinite(receiverMin.x) && isFinite(receiverMax.x);
 }
 
 // Builds the shadow maps from the frame's recorded casters (see
@@ -1978,6 +2113,19 @@ bool HeadlessBackend::createMesh(MeshHandle id, const MeshDescription &descripti
             mesh.uvs[v * 2 + 0]       = s[9];
             mesh.uvs[v * 2 + 1]       = s[10];
         }
+        // Index bounds (defense in depth: render_data validates a mesh before
+        // it reaches a backend, but a direct createMesh call whose indices
+        // reach past the vertex array would read out of bounds through the
+        // whole software rasterizer). RenderError::InvalidMesh is the
+        // documented code for exactly this rejection.
+        for (std::size_t i = 0; i < description.indexCount; ++i)
+        {
+            if (idx[i] >= vc)
+            {
+                reportError(error, RenderError::InvalidMesh);
+                return false;
+            }
+        }
         mesh.indices.assign(idx, idx + description.indexCount);
 
         const float *pos = mesh.positions.data();
@@ -1997,7 +2145,7 @@ bool HeadlessBackend::createMesh(MeshHandle id, const MeshDescription &descripti
             radiusSquared         = std::max(radiusSquared, glm::dot(delta, delta));
         }
         mesh.boundsRadius = std::sqrt(radiusSquared);
-        mesh.boundsValid  = std::isfinite(mesh.boundsRadius);
+        mesh.boundsValid  = isFinite(mesh.boundsRadius);
 
         if (lodEnabled_ && mesh.indices.size() >= lodMinTriangles_ * 3)
         {
@@ -2120,7 +2268,7 @@ bool HeadlessBackend::updateMeshVertices(MeshHandle mesh, const void *vertices, 
             radiusSquared = std::max(radiusSquared, glm::dot(delta, delta));
         }
         record.boundsRadius = std::sqrt(radiusSquared);
-        record.boundsValid  = std::isfinite(record.boundsRadius);
+        record.boundsValid  = isFinite(record.boundsRadius);
 
         // The geometry changed: cached world-space transforms and winding
         // votes derived from the old positions are invalid from this call on.
@@ -2130,6 +2278,10 @@ bool HeadlessBackend::updateMeshVertices(MeshHandle mesh, const void *vertices, 
             memo.sources.fill(nullptr);
             memo.signs.fill(0.0f);
         }
+        // The shadow-map rebuild hash keys on the geometry generation (see
+        // sunShadowCastersHash): stamp the new revision so the next endFrame
+        // rebuilds the sun/sky maps for the deformed surface.
+        ++record.geometryRevision;
         reportError(error, RenderError::None);
         return true;
     }
@@ -2222,6 +2374,15 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
                 levelHeight = nextHeight;
             }
             texture.mipChain = std::move(chain);
+        }
+        // A re-creation under an existing handle is rejected the same way
+        // createMesh (and the Vulkan backend) rejects it: the caller owns the
+        // handle lifecycle, and silently keeping the old texture under a
+        // "successful" call would hide the mistake.
+        if (textures.find(id) != textures.end())
+        {
+            reportError(error, RenderError::CreationFailed);
+            return false;
         }
         textures.emplace(id, std::move(texture));
         reportError(error, RenderError::None);
@@ -2360,7 +2521,7 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
         {
             const float screenY
                 = (1.0f - (clipY / clipW * 0.5f + 0.5f)) * static_cast<float>(framebufferHeight);
-            if (!std::isfinite(screenY))
+            if (!isFinite(screenY))
             {
                 // Degenerate projection (w at/near zero): the rasterizer's
                 // bounding-box clamp keeps it inside the framebuffer, so
@@ -2435,8 +2596,29 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
     if (tileParallelEnabled_ && workers >= 2u && taskScheduler_ != nullptr && taskScheduler_->isRunning()
         && (useParallel || useBandParallel) && buildTileRecords(meshData, setup))
     {
-        if (rasterResultScratch_.size() < workers)
-            rasterResultScratch_.resize(workers);
+        try
+        {
+            if (rasterResultScratch_.size() < workers)
+                rasterResultScratch_.resize(workers);
+        }
+        catch (const std::bad_alloc &)
+        {
+            // No per-worker result slots: replay the binned records
+            // sequentially over the whole framebuffer (the same records in
+            // the same order the parallel path would have rasterized).
+            for (const TileBinRecord &record : tileRecords_)
+            {
+                if (record.shadeRuns
+                        ? rasterizeFanRecordRuns(setup, record, 0, static_cast<std::int32_t>(framebufferWidth) - 1,
+                            0, static_cast<std::int32_t>(framebufferHeight) - 1, nullptr)
+                        : rasterizeFanRecord(setup, record, 0, static_cast<std::int32_t>(framebufferWidth) - 1, 0,
+                            static_cast<std::int32_t>(framebufferHeight) - 1, nullptr))
+                {
+                    ++statistics_.trianglesRasterized;
+                }
+            }
+            return;
+        }
         for (std::uint32_t workerIndex = 0; workerIndex < workers; ++workerIndex)
             rasterResultScratch_[workerIndex].trianglesRasterized = 0;
         TaskGroup tileGroup;
@@ -2464,16 +2646,36 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
 
     if (useBandParallel)
     {
-        if (rasterResultScratch_.size() < workers)
-            rasterResultScratch_.resize(workers);
+        try
+        {
+            if (rasterResultScratch_.size() < workers)
+                rasterResultScratch_.resize(workers);
+        }
+        catch (const std::bad_alloc &)
+        {
+            // Allocation failure must not escape into the application: fall
+            // back to the serial rasterization of the whole draw (identical
+            // output, one thread).
+            rasterizeTriangles(meshData, setup, 0, triCount, false, nullptr);
+            return;
+        }
         TaskGroup group;
         // Band boundaries over the projected extent, rounded outward so no
         // coverage falls between bands; a short extent yields empty bands
         // (their row loop starts past its end and exits immediately).
+        // Both extents clamp in FLOAT space before the unsigned cast: a draw
+        // projecting fully above the viewport carries a negative floor, and a
+        // finite clip-space ratio can carry a screen extent up toward FLT_MAX
+        // (includeScreenY replaces Inf/NaN with the full height, but ~3e38
+        // survives as a finite value) - casting either side straight is
+        // undefined. The clamp keeps every in-range extent bit-identical and
+        // pins the degenerate ones to the full-height band.
+        const float clampedExtentMinY = std::clamp(extentMinY, 0.0f, static_cast<float>(framebufferHeight));
+        const float clampedExtentMaxY = std::clamp(extentMaxY, 0.0f, static_cast<float>(framebufferHeight));
         const std::uint32_t bandTop    = std::min<std::uint32_t>(framebufferHeight - 1u,
-            static_cast<std::uint32_t>(std::max(0.0f, std::floor(extentMinY))));
-        const std::uint32_t bandBottom = std::min(framebufferHeight - 1u,
-            static_cast<std::uint32_t>(std::ceil(extentMaxY)));
+            static_cast<std::uint32_t>(std::floor(clampedExtentMinY)));
+        const std::uint32_t bandBottom = std::min<std::uint32_t>(framebufferHeight - 1u,
+            static_cast<std::uint32_t>(std::ceil(clampedExtentMaxY)));
         const std::uint32_t extentRows = bandBottom >= bandTop ? bandBottom - bandTop + 1u : 1u;
         const std::uint32_t bandRows   = std::max<std::uint32_t>(1u, extentRows / workers);
         for (std::uint32_t workerIndex = 1; workerIndex < workers; ++workerIndex)
@@ -2510,8 +2712,19 @@ void HeadlessBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const 
         return;
     }
 
-    if (rasterResultScratch_.size() < workers)
-        rasterResultScratch_.resize(workers);
+    try
+    {
+        if (rasterResultScratch_.size() < workers)
+            rasterResultScratch_.resize(workers);
+    }
+    catch (const std::bad_alloc &)
+    {
+        // Allocation failure must not escape into the application: fall back
+        // to the serial rasterization of the whole draw (identical output,
+        // one thread).
+        rasterizeTriangles(meshData, setup, 0, triCount, false, nullptr);
+        return;
+    }
     std::vector<StripResult> &results = rasterResultScratch_;
     for (std::uint32_t workerIndex = 0; workerIndex < workers; ++workerIndex)
         results[workerIndex].trianglesRasterized = 0;
@@ -2613,6 +2826,10 @@ void HeadlessBackend::drawMeshBatch(const MeshBatchItem *items, std::uint32_t it
 
     const MeshMaterial defaultMaterial;
     std::uint32_t     index = 0;
+    // Set when an item's record emission failed mid-chunk: the chunk flush
+    // runs first (its records are still needed), then the item replays
+    // through the single-draw path (see the catch handler below).
+    std::optional<MeshBatchItem> pendingFallbackItem;
     while (index < itemCount)
     {
         // ---- chunk preparation (serial) --------------------------------------
@@ -2702,12 +2919,16 @@ void HeadlessBackend::drawMeshBatch(const MeshBatchItem *items, std::uint32_t it
             catch (const std::bad_alloc &)
             {
                 // Drop the partially emitted item (its records are
-                // incomplete), refund its submitted count and hand it to the
-                // single-draw path, then flush what complete items did make
-                // it into the chunk.
+                // incomplete) and refund its submitted count. The item is
+                // replayed through the single-draw path only AFTER the
+                // chunk flush below: drawMesh's own tile path clears and
+                // refills tileRecords_ with records stamped against its own
+                // one-element setup array, so running it here would clobber
+                // the complete items' records and leave the flush
+                // rasterizing them against the wrong setup.
                 tileRecords_.resize(recordsBefore);
                 statistics_.trianglesSubmitted -= triCount;
-                drawMesh(item.mesh, item.modelMatrix, material);
+                pendingFallbackItem = item;
                 ++consumed;
                 break;
             }
@@ -2715,85 +2936,92 @@ void HeadlessBackend::drawMeshBatch(const MeshBatchItem *items, std::uint32_t it
         }
 
         // ---- chunk flush ------------------------------------------------------
+        const auto replayRecordsSequentially = [&]()
+        {
+            for (const TileBinRecord &record : tileRecords_)
+            {
+                if (record.shadeRuns
+                        ? rasterizeFanRecordRuns(batchSetups_[record.setupIndex], record, 0,
+                            static_cast<std::int32_t>(framebufferWidth) - 1, 0,
+                            static_cast<std::int32_t>(framebufferHeight) - 1, nullptr)
+                        : rasterizeFanRecord(batchSetups_[record.setupIndex], record, 0,
+                            static_cast<std::int32_t>(framebufferWidth) - 1, 0,
+                            static_cast<std::int32_t>(framebufferHeight) - 1, nullptr))
+                {
+                    ++statistics_.trianglesRasterized;
+                }
+            }
+        };
         if (tileRecords_.empty())
         {
-            index = consumed;
-            continue;
+            // Nothing rasterizable made it into the chunk; the pending
+            // fallback item (if any) still needs its own draw.
         }
-        if (!buildBatchTileRecords())
+        else if (!buildBatchTileRecords())
         {
             // Binning refused the chunk (allocation failure or an un-binnable
             // record span). The records themselves are complete geometry in
             // submission order, so replay them sequentially over the whole
             // framebuffer - the same pixels in the same order as the
             // parallel path, one record at a time.
-            for (const TileBinRecord &record : tileRecords_)
+            replayRecordsSequentially();
+        }
+        else
+        {
+            bool scratchReady = false;
+            try
             {
-                if (record.shadeRuns
-                        ? rasterizeFanRecordRuns(batchSetups_[record.setupIndex], record, 0,
-                            static_cast<std::int32_t>(framebufferWidth) - 1, 0,
-                            static_cast<std::int32_t>(framebufferHeight) - 1, nullptr)
-                        : rasterizeFanRecord(batchSetups_[record.setupIndex], record, 0,
-                            static_cast<std::int32_t>(framebufferWidth) - 1, 0,
-                            static_cast<std::int32_t>(framebufferHeight) - 1, nullptr))
+                if (rasterResultScratch_.size() < workers)
+                    rasterResultScratch_.resize(workers);
+                scratchReady = true;
+            }
+            catch (const std::bad_alloc &)
+            {
+                // No per-worker result slots: the counts cannot be gathered, but
+                // the pixels still must be. Replay the binned records
+                // sequentially (the per-record loop above) so the chunk draws
+                // exactly once either way.
+                replayRecordsSequentially();
+            }
+            if (scratchReady)
+            {
+                for (std::uint32_t workerIndex = 0; workerIndex < workers; ++workerIndex)
+                    rasterResultScratch_[workerIndex].trianglesRasterized = 0;
+                TaskGroup tileGroup;
+                const RasterSetup *setups = batchSetups_.data();
+                for (std::uint32_t workerIndex = 1; workerIndex < workers; ++workerIndex)
                 {
-                    ++statistics_.trianglesRasterized;
+                    const std::uint32_t batchWorkerIndex = workerIndex;
+                    // Tiles are owned exclusively by worker index, so a share whose
+                    // submission is rejected can run inline on the calling thread
+                    // without any new races.
+                    if (!taskScheduler_->schedule(tileGroup,
+                            [this, setups, batchWorkerIndex, workers]()
+                            { rasterizeTileRecords(setups, batchWorkerIndex, workers, &rasterResultScratch_[batchWorkerIndex]); }))
+                    {
+                        rasterizeTileRecords(setups, batchWorkerIndex, workers, &rasterResultScratch_[batchWorkerIndex]);
+                    }
                 }
-            }
-            index = consumed;
-            continue;
-        }
-
-        try
-        {
-            if (rasterResultScratch_.size() < workers)
-                rasterResultScratch_.resize(workers);
-        }
-        catch (const std::bad_alloc &)
-        {
-            // No per-worker result slots: the counts cannot be gathered, but
-            // the pixels still must be. Replay the binned records
-            // sequentially (the per-record loop above) so the chunk draws
-            // exactly once either way.
-            for (const TileBinRecord &record : tileRecords_)
-            {
-                if (record.shadeRuns
-                        ? rasterizeFanRecordRuns(batchSetups_[record.setupIndex], record, 0,
-                            static_cast<std::int32_t>(framebufferWidth) - 1, 0,
-                            static_cast<std::int32_t>(framebufferHeight) - 1, nullptr)
-                        : rasterizeFanRecord(batchSetups_[record.setupIndex], record, 0,
-                            static_cast<std::int32_t>(framebufferWidth) - 1, 0,
-                            static_cast<std::int32_t>(framebufferHeight) - 1, nullptr))
-                {
-                    ++statistics_.trianglesRasterized;
-                }
-            }
-            index = consumed;
-            continue;
-        }
-        for (std::uint32_t workerIndex = 0; workerIndex < workers; ++workerIndex)
-            rasterResultScratch_[workerIndex].trianglesRasterized = 0;
-        TaskGroup tileGroup;
-        const RasterSetup *setups = batchSetups_.data();
-        for (std::uint32_t workerIndex = 1; workerIndex < workers; ++workerIndex)
-        {
-            const std::uint32_t batchWorkerIndex = workerIndex;
-            // Tiles are owned exclusively by worker index, so a share whose
-            // submission is rejected can run inline on the calling thread
-            // without any new races.
-            if (!taskScheduler_->schedule(tileGroup,
-                    [this, setups, batchWorkerIndex, workers]()
-                    { rasterizeTileRecords(setups, batchWorkerIndex, workers, &rasterResultScratch_[batchWorkerIndex]); }))
-            {
-                rasterizeTileRecords(setups, batchWorkerIndex, workers, &rasterResultScratch_[batchWorkerIndex]);
+                rasterizeTileRecords(setups, 0u, workers, &rasterResultScratch_[0]);
+                tileGroup.wait(*taskScheduler_);
+                std::uint64_t totalRasterized = 0;
+                for (std::uint32_t workerIndex = 0; workerIndex < workers; ++workerIndex)
+                    totalRasterized += rasterResultScratch_[workerIndex].trianglesRasterized;
+                statistics_.trianglesRasterized += totalRasterized;
             }
         }
-        rasterizeTileRecords(setups, 0u, workers, &rasterResultScratch_[0]);
-        tileGroup.wait(*taskScheduler_);
-        std::uint64_t totalRasterized = 0;
-        for (std::uint32_t workerIndex = 0; workerIndex < workers; ++workerIndex)
-            totalRasterized += rasterResultScratch_[workerIndex].trianglesRasterized;
-        statistics_.trianglesRasterized += totalRasterized;
+        // The chunk is rasterized (or was empty); now the item whose record
+        // emission failed mid-chunk replays through the single-draw path,
+        // after the items before it and before the chunks after it - its
+        // place in submission order.
+        if (pendingFallbackItem.has_value())
+        {
+            const MeshBatchItem &fallbackItem = *pendingFallbackItem;
+            drawMesh(fallbackItem.mesh,
+                fallbackItem.modelMatrix,
+                fallbackItem.material != nullptr ? *fallbackItem.material : defaultMaterial);
+            pendingFallbackItem.reset();
+        }
         index = consumed;
     }
 }
@@ -2843,11 +3071,12 @@ void HeadlessBackend::drawFur(MeshHandle mesh, const float *modelMatrix, const M
             return;
         }
         // Submitted counts per layer whose triangles were actually handed to
-        // the rasterizer; a failed prepare aborts the stack without counting
-        // layers that never ran.
+        // rasterizer; a failed prepare aborts the stack without counting
+        // layers that never ran. Rasterized comes from rasterizeTriangles'
+        // internal accounting (it counts only triangles that shaded at least
+        // one pixel, the same semantics every other draw path uses).
         statistics_.trianglesSubmitted += setup.triangleCount;
         rasterizeTriangles(meshData, setup, 0, setup.triangleCount, false, nullptr);
-        statistics_.trianglesRasterized += setup.triangleCount;
     }
 }
 
@@ -2872,9 +3101,14 @@ void HeadlessBackend::drawFurInstances(MeshHandle mesh, const float *modelMatric
 // alpha blending into the color buffer.
 void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
 {
+    // Entry validation matches the Vulkan backend's drawOverlay (finite
+    // display size and scale; a NaN slips past the `<= 0.0f` comparisons
+    // because every NaN comparison is false, so finiteness is tested
+    // explicitly through the flag-proof bit test).
     if (framebufferWidth == 0 || framebufferHeight == 0 || data.vertices == nullptr || data.indices == nullptr
-        || data.commands == nullptr || data.displaySize[0] <= 0.0f || data.displaySize[1] <= 0.0f
-        || data.framebufferScale[0] <= 0.0f || data.framebufferScale[1] <= 0.0f)
+        || data.commands == nullptr || !isFinite(data.displaySize[0]) || !isFinite(data.displaySize[1])
+        || data.displaySize[0] <= 0.0f || data.displaySize[1] <= 0.0f || !isFinite(data.framebufferScale[0])
+        || !isFinite(data.framebufferScale[1]) || data.framebufferScale[0] <= 0.0f || data.framebufferScale[1] <= 0.0f)
     {
         return;
     }
@@ -2902,8 +3136,8 @@ void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
         const float clipMinY = (draw.clipRectangle[1] - data.displayPosition[1]) * scaleY;
         const float clipMaxX = (draw.clipRectangle[2] - data.displayPosition[0]) * scaleX;
         const float clipMaxY = (draw.clipRectangle[3] - data.displayPosition[1]) * scaleY;
-        if (!std::isfinite(clipMinX) || !std::isfinite(clipMinY) || !std::isfinite(clipMaxX)
-            || !std::isfinite(clipMaxY))
+        if (!isFinite(clipMinX) || !isFinite(clipMinY) || !isFinite(clipMaxX)
+            || !isFinite(clipMaxY))
         {
             continue;
         }
@@ -2924,6 +3158,19 @@ void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
 
         const auto sampleRgba = [texture](float u, float v, float out[4])
         {
+            // A non-finite coordinate must not reach the uint32 texel
+            // casts below: the clamp pair above it passes NaN through
+            // (std::clamp keeps the value when both comparisons fail), and
+            // floor(NaN) cast to uint32 is undefined behaviour that lands
+            // ~2^31 texels outside the texture on the usual targets. The
+            // per-triangle finiteness gate keeps app-supplied vertices from
+            // producing one; this entry check is the belt that makes the
+            // sampler itself safe for any input.
+            if (!isFinite(u) || !isFinite(v))
+            {
+                out[0] = out[1] = out[2] = out[3] = 1.0f;
+                return;
+            }
             if (texture->address == TextureAddress::Repeat)
             {
                 u -= std::floor(u);
@@ -2976,12 +3223,48 @@ void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
             const OverlayVertex &a    = data.vertices[ia64];
             const OverlayVertex &b    = data.vertices[ib64];
             const OverlayVertex &c    = data.vertices[ic64];
+            // Overlay vertices are app-supplied capability data with no
+            // prepare step of their own (the mesh twin validates its whole
+            // stream in render_data.cpp): a non-finite position or UV would
+            // poison the area test (NaN comparisons never reject), the
+            // screen-bounds floor/ceil casts and - through the interpolated
+            // barycentrics - the texture sample. Such a triangle is skipped
+            // whole; the bit-level tests cannot be folded away by this
+            // unit's math flags (see finite_math.hpp).
+            const auto vertexInputsFinite = [](const OverlayVertex &vertex)
+            {
+                return isFinite(vertex.position[0]) && isFinite(vertex.position[1]) && isFinite(vertex.uv[0])
+                    && isFinite(vertex.uv[1]);
+            };
+            if (!vertexInputsFinite(a) || !vertexInputsFinite(b) || !vertexInputsFinite(c))
+                continue;
             const float          ax   = (a.position[0] - data.displayPosition[0]) * scaleX;
             const float          ay   = (a.position[1] - data.displayPosition[1]) * scaleY;
             const float          bx   = (b.position[0] - data.displayPosition[0]) * scaleX;
             const float          by   = (b.position[1] - data.displayPosition[1]) * scaleY;
             const float          cx   = (c.position[0] - data.displayPosition[0]) * scaleX;
             const float          cy   = (c.position[1] - data.displayPosition[1]) * scaleY;
+            // Transformed-coordinate domain gate (extends the raw-vertex gate
+            // above to the values the scan-bounds casts below actually
+            // consume): finite display offsets and scales can still overflow
+            // the subtraction (1e38 - (-1e38) -> Inf) or the scale multiply
+            // (1e30 * 1000 -> Inf), and a huge-but-finite coordinate leaves
+            // the int32 domain of the floor/ceil casts - undefined behaviour
+            // the raw-vertex finiteness gate cannot see. Out-of-domain
+            // triangles skip whole, the same documented degradation the raw
+            // gate applies; display-pixel coordinates (the overlay's contract)
+            // are orders of magnitude below the bound and pass untouched.
+            // 2147483520 = 2^31 - 128: the largest float whose floor/ceil
+            // stays inside int32 (the V3 belt's constant).
+            const auto transformedCoordUsable = [](float coordinate)
+            {
+                return isFinite(coordinate) && std::abs(coordinate) <= 2147483520.0f;
+            };
+            if (!transformedCoordUsable(ax) || !transformedCoordUsable(ay) || !transformedCoordUsable(bx)
+                || !transformedCoordUsable(by) || !transformedCoordUsable(cx) || !transformedCoordUsable(cy))
+            {
+                continue;
+            }
             const float          area = edge(ax, ay, bx, by, cx, cy);
             if (std::abs(area) <= 1.0e-8f)
                 continue;
@@ -3002,6 +3285,14 @@ void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
                     {channel(b.color, 0), channel(b.color, 8), channel(b.color, 16), channel(b.color, 24)},
                     {channel(c.color, 0), channel(c.color, 8), channel(c.color, 16), channel(c.color, 24)}};
 
+            // Top-left fill rule (see edgeAcceptsBoundary): the -1e-5 band
+            // below stays as the rounding margin it always was, but a pixel
+            // that lands in the band on an edge this triangle does not own
+            // is now rejected, so the two triangles of one overlay quad no
+            // longer both blend their shared diagonal.
+            const bool overlayBoundaryA = edgeAcceptsBoundary(cx - bx, cy - by);
+            const bool overlayBoundaryB = edgeAcceptsBoundary(ax - cx, ay - cy);
+            const bool overlayBoundaryC = edgeAcceptsBoundary(bx - ax, by - ay);
             bool wroteAnyPixel = false;
             for (std::int32_t y = top; y < bottom; ++y)
             {
@@ -3013,6 +3304,9 @@ void HeadlessBackend::drawOverlay(const OverlayDrawData &data)
                     const float wb = edge(cx, cy, ax, ay, px, py) / area;
                     const float wc = 1.0f - wa - wb;
                     if (wa < -1.0e-5f || wb < -1.0e-5f || wc < -1.0e-5f)
+                        continue;
+                    if ((!overlayBoundaryA && wa <= 1.0e-5f) || (!overlayBoundaryB && wb <= 1.0e-5f)
+                        || (!overlayBoundaryC && wc <= 1.0e-5f))
                         continue;
 
                     const float u = a.uv[0] * wa + b.uv[0] * wb + c.uv[0] * wc;
@@ -3152,6 +3446,18 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     RasterSetup &outSetup, const DrawBounds *precomputedBounds, const FurLayerParams *furParams, float furLayer)
 {
     if (framebufferWidth == 0 || framebufferHeight == 0)
+    {
+        return false;
+    }
+
+    // Model-matrix finiteness gate: one NaN/Inf entry poisons every derived
+    // quantity (clip positions, world bounds, the normal matrix), and the
+    // rasterizer's clip walk relies on standard NaN comparison semantics to
+    // reject such triangles. The GPU twin discards these draws in clipping
+    // (all-NaN vertices fall outside every clip plane), so skipping them is
+    // parity, not divergence. Bit-level test: this unit compiles with
+    // -ffast-math, where std::isfinite folds to constant true.
+    if (modelMatrix == nullptr || !isFiniteRange(modelMatrix, 16u))
     {
         return false;
     }
@@ -3335,7 +3641,7 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
                             {
                                 const glm::vec3 normalRaw           = modelNormalMatrix * glm::make_vec3(nrmData + v * 3);
                                 const float     normalLengthSquared = glm::dot(normalRaw, normalRaw);
-                                out.worldNormal = normalLengthSquared > 0.0f && std::isfinite(normalLengthSquared)
+                                out.worldNormal = normalLengthSquared > 0.0f && isFinite(normalLengthSquared)
                                                     ? normalRaw * glm::inversesqrt(normalLengthSquared)
                                                     : glm::vec3(0.0f, 1.0f, 0.0f);
                             }
@@ -3541,18 +3847,7 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     return true;
 }
 
-// Whole-mesh single-threaded rasterization wrapper (drawMesh uses the
-// parallel-split path above).
-void HeadlessBackend::rasterizeMesh(const HeadlessMesh &mesh, const float *modelMatrix, const MeshMaterial &material)
-{
-    statistics_.trianglesSubmitted += mesh.indices.size() / 3;
-    RasterSetup setup;
-    if (!prepareRasterization(mesh, modelMatrix, material, mesh.indices.data(), mesh.indices.size(), setup))
-    {
-        return;
-    }
-    rasterizeTriangles(mesh, setup, 0, setup.triangleCount, false, nullptr);
-}
+
 
 // The rasterizer core. For each triangle: shade/transform corners (reusing
 // the transform cache when allowed), clip against the near plane, project to
@@ -3674,7 +3969,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                 {
                     const glm::vec3 normalRaw           = modelNormalMatrix * glm::make_vec3(nrmData + vertexIndex * 3);
                     const float     normalLengthSquared = glm::dot(normalRaw, normalRaw);
-                    corners[corner].worldNormal = normalLengthSquared > 0.0f && std::isfinite(normalLengthSquared)
+                    corners[corner].worldNormal = normalLengthSquared > 0.0f && isFinite(normalLengthSquared)
                                                     ? normalRaw * glm::inversesqrt(normalLengthSquared)
                                                     : glm::vec3(0.0f, 1.0f, 0.0f);
                 }
@@ -3886,11 +4181,51 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
             const float uvDenominatorX = gradAx * inverseWA + gradBx * inverseWB + gradCx * inverseWC;
             const float uvDenominatorY = gradAy * inverseWA + gradBy * inverseWB + gradCy * inverseWC;
 
+            // Mottle footprint (mottle_noise.hpp; prepareFanTriangles'
+            // record-carrying twin): the world extent of this fan over its
+            // screen extent - what one shaded sample covers on this surface.
+            // The serial core carries no records, so the value is derived
+            // per fan here and the pixel loop applies the pass exactly like
+            // the tile path does.
+            const bool noiseActive = setup.noiseScaleMeters > 0.0f && setup.noiseStrength > 0.0f;
+            float      noiseFootprintMeters = 0.0f;
+            if (noiseActive)
+            {
+                const glm::vec3 &worldA = clipped[cornerA].worldPosition;
+                const glm::vec3 &worldB = clipped[cornerB].worldPosition;
+                const glm::vec3 &worldC = clipped[cornerC].worldPosition;
+                const glm::vec3 worldMin(glm::min(glm::min(worldA.x, worldB.x), worldC.x),
+                    glm::min(glm::min(worldA.y, worldB.y), worldC.y),
+                    glm::min(glm::min(worldA.z, worldB.z), worldC.z));
+                const glm::vec3 worldMax(glm::max(glm::max(worldA.x, worldB.x), worldC.x),
+                    glm::max(glm::max(worldA.y, worldB.y), worldC.y),
+                    glm::max(glm::max(worldA.z, worldB.z), worldC.z));
+                const float worldExtent = glm::max(
+                    glm::max(worldMax.x - worldMin.x, worldMax.y - worldMin.y), worldMax.z - worldMin.z);
+                const float screenExtent = glm::max(glm::max(
+                                              glm::abs(screen[cornerC].x - screen[cornerA].x),
+                                              glm::abs(screen[cornerB].x - screen[cornerA].x)),
+                    glm::max(glm::abs(screen[cornerC].y - screen[cornerA].y),
+                        glm::abs(screen[cornerB].y - screen[cornerA].y)));
+                noiseFootprintMeters = screenExtent > 0.5f ? worldExtent / (screenExtent + 1.0f) : worldExtent;
+            }
+
             const float weightADx = -(screen[cornerC].y - screen[cornerB].y) * inverseArea;
             const float weightBDx = -(screen[cornerA].y - screen[cornerC].y) * inverseArea;
             const float sampleX   = static_cast<float>(firstX) + 0.5f;
             const float depthADx
                 = weightADx * depth[cornerA] + weightBDx * depth[cornerB] - (weightADx + weightBDx) * depth[cornerC];
+            // Top-left fill rule (see fillRuleBitsFor): the coverage test
+            // below keeps boundary pixels only on the edges this fan owns.
+            const std::uint8_t fillRuleBits = fillRuleBitsFor(screen[cornerA].x,
+                screen[cornerA].y,
+                screen[cornerB].x,
+                screen[cornerB].y,
+                screen[cornerC].x,
+                screen[cornerC].y);
+            const bool boundaryA = (fillRuleBits & 1u) != 0u;
+            const bool boundaryB = (fillRuleBits & 2u) != 0u;
+            const bool boundaryC = (fillRuleBits & 4u) != 0u;
 
             for (std::int32_t y = firstY; y <= lastY; ++y)
             {
@@ -3912,10 +4247,15 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                 for (std::int32_t x = firstX; x <= lastX; ++x, ++pixelIndex)
                 {
 #if defined(__GNUC__) || defined(__clang__)
-                    __builtin_prefetch(&depthBuffer[pixelIndex + 8], 0, 0);
+                    if (x + 8 <= lastX)
+                    {
+                        __builtin_prefetch(&depthBuffer[pixelIndex + 8], 0, 0);
+                    }
 #endif
                     const float weightC = 1.0f - weightA - weightB;
-                    if (weightA >= 0.0f && weightB >= 0.0f && weightC >= 0.0f)
+                    if ((boundaryA ? weightA >= 0.0f : weightA > 0.0f)
+                        && (boundaryB ? weightB >= 0.0f : weightB > 0.0f)
+                        && (boundaryC ? weightC >= 0.0f : weightC > 0.0f))
                     {
                         const float currentDepth = depthBuffer[pixelIndex];
                         if (pixelDepth >= currentDepth)
@@ -4014,6 +4354,18 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                         const glm::vec3 interpolatedPosition = correctedA * clipped[cornerA].worldPosition
                                                              + correctedB * clipped[cornerB].worldPosition
                                                              + correctedC * clipped[cornerC].worldPosition;
+                        // Procedural surface mottle (mottle_noise.hpp), the
+                        // tile path's twin block (shadeTrianglePixel): the
+                        // footprint-adaptive two-octave value noise at the
+                        // sample's world position multiplies the albedo of lit
+                        // and unlit draws alike (fur included).
+                        if (noiseActive)
+                        {
+                            baseColor *= mottle::albedoModulation(interpolatedPosition,
+                                setup.noiseScaleMeters,
+                                noiseFootprintMeters,
+                                setup.noiseStrength);
+                        }
                         glm::vec3 shaded = baseColor;
                         if (!unlit)
                         {
@@ -4097,22 +4449,61 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                           - occlusionStrength
                                                 * (1.0f - occlusionMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY).r)
                                     : 1.0f;
+                            // Sun shadow map (sun_shadows.hpp), the tile
+                            // path's twin: the sun's diffuse and specular
+                            // terms scale by the percentage-closer visibility
+                            // of this point.
+                            glm::vec3 sunRadiance = sunRadiance_;
+                            if (sunShadowMap_.valid && sunRadiance.x + sunRadiance.y + sunRadiance.z > 0.0f)
+                            {
+                                sunRadiance *= sunShadowVisibility(interpolatedPosition, normal);
+                            }
+                            // Zenith sky visibility, the tile path's twin: the
+                            // HEMISPHERIC ambient is the sky's diffuse
+                            // approximation, so what stands between this
+                            // point and the open sky scales it (the GI
+                            // ambient stays untouched).
+                            glm::vec3 ambientSkySky    = ambientSky_;
+                            glm::vec3 ambientGroundSky = ambientGround_;
+                            if (skyShadowMap_.valid && normal.y > 0.0f)
+                            {
+                                const float skyVisible = skyShadowVisibility(interpolatedPosition, normal);
+                                ambientSkySky *= skyVisible;
+                                ambientGroundSky *= skyVisible;
+                            }
+                            // Gather field (radiance_cache.gather hook), the
+                            // tile path's twin: the final gather's per-pixel
+                            // irradiance replaces the probe-walk ambient
+                            // wherever the field covers the position; the
+                            // probe-walk grid stays the fallback.
+                            GiAmbientSample gatherSample;
+                            const GiAmbientSample *effectiveGiSample = nullptr;
+                            if (preparedGatherField_.valid
+                                && sampleGatherField(preparedGatherField_,
+                                    interpolatedPosition,
+                                    gatherSample.irradiance,
+                                    gatherSample.coverage,
+                                    gatherSample.occlusion))
+                            {
+                                gatherSample.valid = true;
+                                effectiveGiSample  = &gatherSample;
+                            }
                             shaded = pbrShade(normal,
                                 interpolatedPosition,
                                 cameraPosition_,
                                 lightDirection_,
-                                sunRadiance_,
-                                ambientSky_,
-                                ambientGround_,
+                                sunRadiance,
+                                ambientSkySky,
+                                ambientGroundSky,
                                 baseColor,
                                 metallic,
                                 roughness,
                                 occlusion,
                                 directLights_.data(),
                                 static_cast<std::uint32_t>(directLights_.size()),
-                                preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
-                                setup.opacity,
-                                setup.sheenFactor);
+                                effectiveGiSample == nullptr && preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
+                                setup.sheenFactor,
+                                effectiveGiSample);
                             // Indirect specular (reflection_field field hook):
                             // the field texel this pixel projects into carries
                             // the expected GGX-lobe response of its material,
@@ -4165,14 +4556,39 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                             // fixed-function blending operates in on the UNORM
                             // target - and NO depth write (transparent layers
                             // must not occlude each other or later geometry).
+                            // The read-modify-write blend holds the pixel-group
+                            // lock on the parallel path (two workers can cover
+                            // the same pixel; see PixelGroupLock), and the
+                            // depth test is REPEATED under that lock: the
+                            // pre-shade test at the top of the scan read
+                            // unlocked, so another worker's opaque commit may
+                            // have put nearer geometry in front of this shell
+                            // fragment since - the blend must drop the hidden
+                            // fragment instead of compositing over it.
                             const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
                             std::uint8_t *pixel  = colorBuffer + pixelIndex * 4;
                             const float   oneMinus = 1.0f - furPixelAlpha;
-                            pixel[0] = toByte(encoded.x * furPixelAlpha + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
-                            pixel[1] = toByte(encoded.y * furPixelAlpha + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
-                            pixel[2] = toByte(encoded.z * furPixelAlpha + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
-                            pixel[3] = 255;
-                            rasterized = true;
+                            const auto blendFurPixel = [&]()
+                            {
+                                pixel[0] = toByte(encoded.x * furPixelAlpha + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
+                                pixel[1] = toByte(encoded.y * furPixelAlpha + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
+                                pixel[2] = toByte(encoded.z * furPixelAlpha + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
+                                pixel[3] = 255;
+                            };
+                            if (useAtomicDepth)
+                            {
+                                const PixelGroupLock lock(pixelLocks[pixelIndex / pixelsPerLockGroup_]);
+                                if (pixelDepth < depthBuffer[pixelIndex])
+                                {
+                                    blendFurPixel();
+                                    rasterized = true;
+                                }
+                            }
+                            else
+                            {
+                                blendFurPixel();
+                                rasterized = true;
+                            }
                             weightA += weightADx;
                             weightB += weightBDx;
                             pixelDepth += depthADx;
@@ -4182,6 +4598,27 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                         if (setup.transparent)
                         {
                             std::uint8_t *pixel = colorBuffer + pixelIndex * 4;
+                            // Both transparent commits hold the pixel-group lock
+                            // on the parallel path: the traced response store
+                            // and the classic blend both touch bytes another
+                            // worker's overlapping triangle may be committing.
+                            // The depth test is repeated under the lock for the
+                            // same reason as the fur commit above: the
+                            // unlocked pre-shade test can be stale by the time
+                            // the blend runs, and a fragment an opaque commit
+                            // has since occluded must not composite over it.
+                            std::optional<PixelGroupLock> transparentLock;
+                            if (useAtomicDepth)
+                            {
+                                transparentLock.emplace(pixelLocks[pixelIndex / pixelsPerLockGroup_]);
+                                if (pixelDepth >= depthBuffer[pixelIndex])
+                                {
+                                    weightA += weightADx;
+                                    weightB += weightBDx;
+                                    pixelDepth += depthADx;
+                                    continue;
+                                }
+                            }
                             if (bandFieldTraced)
                             {
                                 // Transmissive commit: the field's response
@@ -4355,7 +4792,7 @@ std::size_t HeadlessBackend::prepareFanTriangles(
             {
                 const glm::vec3 normalRaw           = modelNormalMatrix * glm::make_vec3(nrmData + vertexIndex * 3);
                 const float     normalLengthSquared = glm::dot(normalRaw, normalRaw);
-                corners[corner].worldNormal = normalLengthSquared > 0.0f && std::isfinite(normalLengthSquared)
+                corners[corner].worldNormal = normalLengthSquared > 0.0f && isFinite(normalLengthSquared)
                                                 ? normalRaw * glm::inversesqrt(normalLengthSquared)
                                                 : glm::vec3(0.0f, 1.0f, 0.0f);
             }
@@ -4593,6 +5030,14 @@ std::size_t HeadlessBackend::prepareFanTriangles(
         // emission, where the draw's setup and the record's window are both
         // known; the rasterization loops read only the flag.
         record.shadeRuns = recordRunsEligible(setup);
+        // Top-left fill rule bits (see fillRuleBitsFor): the coverage tests
+        // read these to decide which edges keep boundary pixels.
+        record.fillRuleBits = fillRuleBitsFor(record.screenX[0],
+            record.screenY[0],
+            record.screenX[1],
+            record.screenY[1],
+            record.screenX[2],
+            record.screenY[2]);
     }
     return fanCount;
 }
@@ -4846,7 +5291,6 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
             lights,
             lightCount,
             effectiveGiSample == nullptr && preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
-            setup.opacity,
             setup.sheenFactor,
             effectiveGiSample);
 
@@ -4996,13 +5440,22 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
     const float weightBDx = -(screenYA - screenYC) * inverseArea;
     const float sampleX   = static_cast<float>(firstX) + 0.5f;
     const float depthADx  = weightADx * depthA + weightBDx * depthB - (weightADx + weightBDx) * depthC;
+    // Top-left fill rule (record.fillRuleBits, see fillRuleBitsFor): the
+    // coverage tests below keep boundary pixels only on this record's edges.
+    const bool boundaryA = (record.fillRuleBits & 1u) != 0u;
+    const bool boundaryB = (record.fillRuleBits & 2u) != 0u;
+    const bool boundaryC = (record.fillRuleBits & 4u) != 0u;
 
     bool wrote = false;
     // Alpha cutout threshold, 0 when inactive (see the sequential core's
     // hoist): one compare per covered pixel. Runs-path records reach this
     // function only for narrow windows (recordRunsEligible routes wide ones
     // to the run kernel, whose lane loop carries its own check).
-    const float alphaCutoffActive = (setup.alphaCutoff > 0.0f && !setup.transparent) ? setup.alphaCutoff : 0.0f;
+    // The serial core's gate (see line ~3702): without a base-color map the
+    // 1x1 neutral stand-in's alpha is 1, so the cutoff can never fire - and
+    // sampling it per pixel is wasted work.
+    const float alphaCutoffActive
+        = (setup.alphaCutoff > 0.0f && !setup.transparent && setup.hasBaseColorMap) ? setup.alphaCutoff : 0.0f;
     // The shaded pixel's reflection-field response flag (transmissive
     // commits read it; see the transparent commit below).
     bool fieldTraced = false;
@@ -5041,10 +5494,15 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
         for (std::int32_t x = firstX; x <= lastX; ++x, ++pixelIndex)
         {
 #if defined(__GNUC__) || defined(__clang__)
-            __builtin_prefetch(&depthBuffer[pixelIndex + 8], 0, 0);
+            if (x + 8 <= lastX)
+            {
+                __builtin_prefetch(&depthBuffer[pixelIndex + 8], 0, 0);
+            }
 #endif
             const float weightC = 1.0f - weightA - weightB;
-            if (weightA >= 0.0f && weightB >= 0.0f && weightC >= 0.0f)
+            if ((boundaryA ? weightA >= 0.0f : weightA > 0.0f)
+                && (boundaryB ? weightB >= 0.0f : weightB > 0.0f)
+                && (boundaryC ? weightC >= 0.0f : weightC > 0.0f))
             {
                 const float currentDepth = depthBuffer[pixelIndex];
                 if (pixelDepth >= currentDepth)
@@ -5277,12 +5735,21 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     const float weightBDx = -(screenYA - screenYC) * inverseArea;
     const float sampleX   = static_cast<float>(firstX) + 0.5f;
     const float depthADx  = weightADx * depthA + weightBDx * depthB - (weightADx + weightBDx) * depthC;
+    // Top-left fill rule (record.fillRuleBits, see fillRuleBitsFor): the
+    // coverage tests below keep boundary pixels only on this record's edges.
+    const bool boundaryA = (record.fillRuleBits & 1u) != 0u;
+    const bool boundaryB = (record.fillRuleBits & 2u) != 0u;
+    const bool boundaryC = (record.fillRuleBits & 4u) != 0u;
 
     bool wrote = false;
     // Alpha cutout threshold, 0 when inactive (see the sequential core's
     // hoist): the lane loop compares one fetched texel alpha per accepted
     // lane, and the leftover-column tail keeps the per-sample core's check.
-    const float alphaCutoffActive = (setup.alphaCutoff > 0.0f && !setup.transparent) ? setup.alphaCutoff : 0.0f;
+    // The serial core's gate (see line ~3702): without a base-color map the
+    // 1x1 neutral stand-in's alpha is 1, so the cutoff can never fire - and
+    // sampling it per pixel is wasted work.
+    const float alphaCutoffActive
+        = (setup.alphaCutoff > 0.0f && !setup.transparent && setup.hasBaseColorMap) ? setup.alphaCutoff : 0.0f;
     // The shaded pixel's reflection-field response flag (transmissive
     // commits read it; see the transparent commit below).
     bool fieldTraced = false;
@@ -5353,7 +5820,6 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     runContext.ambientSky      = ambientSky_;
     runContext.ambientGround   = ambientGround_;
     runContext.baseColorFactor = setup.baseColorFactor;
-    runContext.opacity         = setup.opacity;
     runContext.sheenFactor     = setup.sheenFactor;
     runContext.doubleSided     = setup.doubleSided;
     runContext.albedoFilled    = hasBaseColorMap || noiseActive;
@@ -5396,13 +5862,21 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                 // classic alpha blend over the framebuffer. Tile ownership
                 // keeps the per-pixel order equal to the submission order, so
                 // co-transparent surfaces stack far-to-near exactly as the
-                // sequential path blends them.
-                const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
-                const float     oneMinus = 1.0f - setup.opacity;
-                pixel[0] = toByte(encoded.x * setup.opacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
-                pixel[1] = toByte(encoded.y * setup.opacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
-                pixel[2] = toByte(encoded.z * setup.opacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
-                pixel[3] = 255;
+                // sequential path blends them. Run records never carry a
+                // base-color map (recordRunsEligible keeps textured
+                // transparent draws on the per-sample cores), so the blend
+                // factor is the material's opacity alone; the skip below the
+                // 1/255 alpha threshold mirrors the per-sample cores so the
+                // same draw's tail columns and its run lanes agree.
+                if (setup.opacity > 0.0039f)
+                {
+                    const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
+                    const float     oneMinus = 1.0f - setup.opacity;
+                    pixel[0] = toByte(encoded.x * setup.opacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
+                    pixel[1] = toByte(encoded.y * setup.opacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
+                    pixel[2] = toByte(encoded.z * setup.opacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
+                    pixel[3] = 255;
+                }
             }
         }
         else
@@ -5576,13 +6050,26 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     : 0xFFFFu;
                 const __m512 currentDepthv
                     = _mm512_mask_loadu_ps(_mm512_setzero_ps(), laneLimit, depthBuffer + pixelIndex);
+                // Top-left fill rule: edges this record does not own turn
+                // their inclusive >= 0 compare strict (> 0) - a weight of
+                // exactly zero on such an edge rejects the lane, the
+                // consistently-wound neighbour across that edge accepts it.
+                const __mmask16 boundaryOrZeroA = _mm512_cmp_ps_mask(laneWeightAv, _mm512_setzero_ps(), _CMP_GE_OQ)
+                    & (boundaryA ? __mmask16(0xFFFFu)
+                                 : _mm512_cmp_ps_mask(laneWeightAv, _mm512_setzero_ps(), _CMP_GT_OQ));
+                const __mmask16 boundaryOrZeroB = _mm512_cmp_ps_mask(laneWeightBv, _mm512_setzero_ps(), _CMP_GE_OQ)
+                    & (boundaryB ? __mmask16(0xFFFFu)
+                                 : _mm512_cmp_ps_mask(laneWeightBv, _mm512_setzero_ps(), _CMP_GT_OQ));
+                const __mmask16 boundaryOrZeroC = _mm512_cmp_ps_mask(laneWeightCv, _mm512_setzero_ps(), _CMP_GE_OQ)
+                    & (boundaryC ? __mmask16(0xFFFFu)
+                                 : _mm512_cmp_ps_mask(laneWeightCv, _mm512_setzero_ps(), _CMP_GT_OQ));
                 const __mmask16 acceptedMask = laneLimit
-                    & _mm512_cmp_ps_mask(laneWeightAv, _mm512_setzero_ps(), _CMP_GE_OQ)
-                    & _mm512_cmp_ps_mask(laneWeightBv, _mm512_setzero_ps(), _CMP_GE_OQ)
-                    & _mm512_cmp_ps_mask(laneWeightCv, _mm512_setzero_ps(), _CMP_GE_OQ)
+                    & boundaryOrZeroA
+                    & boundaryOrZeroB
+                    & boundaryOrZeroC
                     & _mm512_cmp_ps_mask(laneDepthv, currentDepthv, _CMP_LT_OQ);
 #else
-                const std::uint16_t acceptedMask = 0; (void)laneWeightA; (void)laneDepth;
+                const std::uint16_t acceptedMask = 0; (void)laneWeightA; (void)laneWeightB; (void)laneDepth;
 #endif
                 if (acceptedMask == 0)
                 {
@@ -5725,6 +6212,15 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     {
                         if (((shadedMask >> lane) & 1u) == 0u)
                         {
+                            // Masked lanes never commit, but the full-lane
+                            // loads below read all sixteen entries: leave the
+                            // identity (1.0) so the multiply cannot observe
+                            // indeterminate stack (the normalSample arrays
+                            // above zero their masked lanes for the same
+                            // reason).
+                            texelR[lane] = 1.0f;
+                            texelG[lane] = 1.0f;
+                            texelB[lane] = 1.0f;
                             continue;
                         }
                         const glm::vec3 sampled = setup.baseColorMap->sampleTrilinear(laneU[lane], laneV[lane],
@@ -5741,9 +6237,9 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                 _mm512_store_ps(wide.albedo[1], albedoY);
                 _mm512_store_ps(wide.albedo[2], albedoZ);
 
-                float laneMetallic[16];
-                float laneRoughness[16];
-                float laneOcclusion[16];
+                alignas(64) float laneMetallic[16];
+                alignas(64) float laneRoughness[16];
+                alignas(64) float laneOcclusion[16];
                 for (int lane = 0; lane < 16; ++lane)
                 {
                     laneMetallic[lane]  = setup.metallicFactor;
@@ -5933,12 +6429,44 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     wide.sunVisibility[lane] = 1.0f;
                     wide.skyVisibility[lane] = 1.0f;
                 }
+                // The visibility lookup consumes the lane's finished shading
+                // normal (the per-sample path's order: post-flip, post-TBN);
+                // lanes without a shading normal fall back to the
+                // interpolated geometry normal, flipped toward the viewer on
+                // double-sided draws.
+                __m512 visibilityNormalX = geometryNormalX;
+                __m512 visibilityNormalY = geometryNormalY;
+                __m512 visibilityNormalZ = geometryNormalZ;
+                if (normalMapped)
+                {
+                    visibilityNormalX = _mm512_load_ps(wide.shadeNormal[0]);
+                    visibilityNormalY = _mm512_load_ps(wide.shadeNormal[1]);
+                    visibilityNormalZ = _mm512_load_ps(wide.shadeNormal[2]);
+                }
+                else if (setup.doubleSided)
+                {
+                    __m512 flipViewX = _mm512_sub_ps(_mm512_set1_ps(cameraPosition_.x), posX);
+                    __m512 flipViewY = _mm512_sub_ps(_mm512_set1_ps(cameraPosition_.y), posY);
+                    __m512 flipViewZ = _mm512_sub_ps(_mm512_set1_ps(cameraPosition_.z), posZ);
+                    normalizeWide(flipViewX, flipViewY, flipViewZ);
+                    const __m512 facingDot = _mm512_add_ps(
+                        _mm512_add_ps(_mm512_mul_ps(geometryNormalX, flipViewX),
+                            _mm512_mul_ps(geometryNormalY, flipViewY)),
+                        _mm512_mul_ps(geometryNormalZ, flipViewZ));
+                    const __mmask16 flip = _mm512_cmp_ps_mask(facingDot, _mm512_setzero_ps(), _CMP_LT_OQ);
+                    visibilityNormalX = _mm512_mask_mov_ps(visibilityNormalX, flip,
+                        _mm512_sub_ps(_mm512_setzero_ps(), visibilityNormalX));
+                    visibilityNormalY = _mm512_mask_mov_ps(visibilityNormalY, flip,
+                        _mm512_sub_ps(_mm512_setzero_ps(), visibilityNormalY));
+                    visibilityNormalZ = _mm512_mask_mov_ps(visibilityNormalZ, flip,
+                        _mm512_sub_ps(_mm512_setzero_ps(), visibilityNormalZ));
+                }
                 if (!setup.unlit)
                 {
                     if (sunShadowMap_.valid)
                     {
                         const __m512 vis = wideshading::sunShadowVisibilityWide(sunShadowMap_, posX, posY, posZ,
-                            geometryNormalX, geometryNormalY, geometryNormalZ, shadowFilterRadiusTexels_);
+                            visibilityNormalX, visibilityNormalY, visibilityNormalZ, shadowFilterRadiusTexels_);
                         alignas(64) float visLane[16];
                         _mm512_store_ps(visLane, vis);
                         for (int lane = 0; lane < 16; ++lane)
@@ -5949,14 +6477,14 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     if (skyShadowMap_.valid)
                     {
                         // The scalar path consults the sky map only where the
-                        // lane's normal points up (normal.y > 0): the wide
-                        // call computes every lane, and the mask keeps the
-                        // downward lanes at full visibility.
+                        // lane's shading normal points up (normal.y > 0): the
+                        // wide call computes every lane, and the mask keeps
+                        // the downward lanes at full visibility.
                         const __m512 vis = wideshading::sunShadowVisibilityWide(skyShadowMap_, posX, posY, posZ,
-                            geometryNormalX, geometryNormalY, geometryNormalZ, shadowFilterRadiusTexels_);
+                            visibilityNormalX, visibilityNormalY, visibilityNormalZ, shadowFilterRadiusTexels_);
                         alignas(64) float visLane[16];
                         _mm512_store_ps(visLane, vis);
-                        const __mmask16 upward = _mm512_cmp_ps_mask(geometryNormalY, _mm512_setzero_ps(), _CMP_GT_OQ);
+                        const __mmask16 upward = _mm512_cmp_ps_mask(visibilityNormalY, _mm512_setzero_ps(), _CMP_GT_OQ);
                         for (int lane = 0; lane < 16; ++lane)
                         {
                             if (((upward >> lane) & 1u) != 0u)
@@ -6069,7 +6597,11 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                 for (int lane = 0; lane < 4; ++lane)
                 {
                     const float weightC = 1.0f - laneWeightA[lane] - laneWeightB[lane];
-                    if (weightC >= 0.0f && laneWeightA[lane] >= 0.0f && laneWeightB[lane] >= 0.0f
+                    // Top-left fill rule (see fillRuleBitsFor): boundary
+                    // pixels survive only on this record's own edges.
+                    if ((boundaryA ? laneWeightA[lane] >= 0.0f : laneWeightA[lane] > 0.0f)
+                        && (boundaryB ? laneWeightB[lane] >= 0.0f : laneWeightB[lane] > 0.0f)
+                        && (boundaryC ? weightC >= 0.0f : weightC > 0.0f)
                         && laneDepth[lane] < depthBuffer[pixelIndex + static_cast<std::size_t>(lane)])
                     {
                         accepted[lane] = true;
@@ -6093,10 +6625,16 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                         continue;
                     }
                     // Fresh per run: the hoisted scratch keeps the previous
-                    // run's probe-grid verdict otherwise (see the scratch
-                    // hoist comment above).
+                    // run's probe-grid verdict and shadow visibilities
+                    // otherwise (see the scratch hoist comment above, and the
+                    // 16-wide path's per-run visibility reset - the sky map's
+                    // `normal.y > 0` gate means a downward-facing lane must
+                    // fall back to full visibility, not to the previous run's
+                    // factor).
                     run.giValid[lane] = false;
                     run.giOcclusion[lane] = 1.0f;
+                    run.sunVisibility[lane] = 1.0f;
+                    run.skyVisibility[lane] = 1.0f;
                     const float weightC = 1.0f - laneWeightA[lane] - laneWeightB[lane];
                     const float inverseWSum = laneWeightA[lane] * inverseWA + laneWeightB[lane] * inverseWB
                                              + weightC * inverseWC;
@@ -6237,9 +6775,8 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     run.occlusion[lane] = occlusion;
 
                     // The lane's interpolated surface pair, shared by the
-                    // sun-shadow visibility below and the tile-cache walk
-                    // (the same perspective-correct math the shading kernel
-                    // runs).
+                    // tile-cache walk below (the same perspective-correct
+                    // math the shading kernel runs).
                     const bool laneNeedsSurfacePair
                         = ((sunShadowMap_.valid || skyShadowMap_.valid) && !setup.unlit) || tileCache != nullptr;
                     glm::vec3 pixelPosition(0.0f);
@@ -6256,20 +6793,36 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                             : glm::vec3(0.0f, 1.0f, 0.0f);
                     }
 
-                    // Sun shadow visibility (sun_shadows.hpp), per lane: the
-                    // run kernel multiplies the sun weight by it, exactly
-                    // where the per-sample path scales its sunRadiance copy.
-                    // The zenith sky visibility (the hemispheric ambient's
-                    // grounding factor) rides its own lane field.
+                    // Shadow visibility consumes the lane's finished shading
+                    // normal (the per-sample path's order: post-flip,
+                    // post-TBN); the tile-cache walk keeps the geometry pair.
+                    // Lanes without a shading normal fall back to the
+                    // interpolated geometry normal, flipped toward the viewer
+                    // on double-sided draws.
+                    glm::vec3 pixelShadingNormal = pixelNormal;
                     if (!setup.unlit)
                     {
+                        if (normalMapped)
+                        {
+                            pixelShadingNormal = glm::vec3(run.shadeNormal[0][lane], run.shadeNormal[1][lane],
+                                run.shadeNormal[2][lane]);
+                        }
+                        else if (setup.doubleSided)
+                        {
+                            const glm::vec3 lanePosition = pixelPosition;
+                            const glm::vec3 viewForFlip  = glm::normalize(cameraPosition_ - lanePosition);
+                            if (glm::dot(pixelShadingNormal, viewForFlip) < 0.0f)
+                            {
+                                pixelShadingNormal = -pixelShadingNormal;
+                            }
+                        }
                         if (sunShadowMap_.valid)
                         {
-                            run.sunVisibility[lane] = sunShadowVisibility(pixelPosition, pixelNormal);
+                            run.sunVisibility[lane] = sunShadowVisibility(pixelPosition, pixelShadingNormal);
                         }
-                        if (skyShadowMap_.valid && pixelNormal.y > 0.0f)
+                        if (skyShadowMap_.valid && pixelShadingNormal.y > 0.0f)
                         {
-                            run.skyVisibility[lane] = skyShadowVisibility(pixelPosition, pixelNormal);
+                            run.skyVisibility[lane] = skyShadowVisibility(pixelPosition, pixelShadingNormal);
                         }
                     }
 
@@ -6318,15 +6871,27 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                 weightB    = stepWeightB;
                 pixelDepth = stepDepth;
             }
-        }
 
-        for (std::int32_t x = firstX + ((lastX - firstX + 1) & ~3); x <= lastX; ++x, ++pixelIndex)
-        {
+            // The per-sample tail sits INSIDE the !wide guard with the
+            // 4-wide runs: after the wide pass the loop above consumed the
+            // whole window, and pixelIndex and the edge weights already
+            // stepped past the window's end, so a tail run here would
+            // re-shade columns the wide pass committed and read or write
+            // past the row's right edge (the window can abut the frame
+            // buffer's last column). Indentation kept from the fallback
+            // layout this guard swallows.
+            for (std::int32_t x = firstX + ((lastX - firstX + 1) & ~3); x <= lastX; ++x, ++pixelIndex)
+            {
 #if defined(__GNUC__) || defined(__clang__)
-            __builtin_prefetch(&depthBuffer[pixelIndex + 8], 0, 0);
+            if (x + 8 <= lastX)
+            {
+                __builtin_prefetch(&depthBuffer[pixelIndex + 8], 0, 0);
+            }
 #endif
             const float weightC = 1.0f - weightA - weightB;
-            if (weightA >= 0.0f && weightB >= 0.0f && weightC >= 0.0f)
+            if ((boundaryA ? weightA >= 0.0f : weightA > 0.0f)
+                && (boundaryB ? weightB >= 0.0f : weightB > 0.0f)
+                && (boundaryC ? weightC >= 0.0f : weightC > 0.0f))
             {
                 const float currentDepth = depthBuffer[pixelIndex];
                 if (pixelDepth >= currentDepth)
@@ -6486,7 +7051,8 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
             weightB += weightBDx;
             pixelDepth += depthADx;
         }
-        } // !wideRunsActive_: the 4-wide runs and the per-sample tail
+            } // !wideRunsActive_: the 4-wide runs and the per-sample tail
+        }
     }
     return wrote;
 }

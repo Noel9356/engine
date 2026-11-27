@@ -982,6 +982,16 @@ bool latticeCorners(const GiProbeLevel &level, const glm::vec3 &position, Lattic
     const glm::dvec3 logical(double(position.x) / double(level.spacing) - double(level.originCell.x),
         double(position.y) / double(level.spacing) - double(level.originCell.y),
         double(position.z) / double(level.spacing) - double(level.originCell.z));
+    // A non-finite position (a trace side effect the lattice walk never
+    // produced a finite cell from) fails every range comparison below, so
+    // without this gate it would fall through to the floor/cast chain whose
+    // conversion of a non-finite double is undefined behaviour. Finite but
+    // extreme positions stay inside the range check: the interval test
+    // rejects anything outside [0, dim - 1] before the casts.
+    if (!std::isfinite(logical.x) || !std::isfinite(logical.y) || !std::isfinite(logical.z))
+    {
+        return false;
+    }
     const double limit   = static_cast<double>(dim - 1);
     if (logical.x < 0.0 || logical.y < 0.0 || logical.z < 0.0 || logical.x > limit || logical.y > limit
         || logical.z > limit)

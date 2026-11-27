@@ -136,7 +136,7 @@ std::string readFileIntoString(const std::filesystem::path &path, std::string &e
 // Trust hash of a script package: a length-prefixed digest over the manifest and
 // every .lua file sorted by relative path (the version tag pins the layout, so
 // any rename or reorder changes the hash).
-std::string scriptPluginContentHash(const PluginManifest &pluginManifest)
+std::string scriptPluginContentHash(const std::filesystem::path &packageDirectory)
 {
     struct HashedFile
     {
@@ -147,29 +147,30 @@ std::string scriptPluginContentHash(const PluginManifest &pluginManifest)
     std::vector<HashedFile>                       files;
     std::error_code                               scanError;
     std::filesystem::recursive_directory_iterator iterator(
-        pluginManifest.directory, std::filesystem::directory_options::skip_permission_denied, scanError);
-    if (!scanError)
+        packageDirectory, std::filesystem::directory_options::skip_permission_denied, scanError);
+    // The increment carries its own error_code: the constructing overload
+    // only covers construction, and a throwing increment would escape the
+    // hash walk into the kernel's startup path.
+    for (; !scanError && iterator != std::filesystem::recursive_directory_iterator();
+        iterator.increment(scanError))
     {
-        for (const std::filesystem::directory_entry &entry : iterator)
+        const std::filesystem::directory_entry &entry = *iterator;
+        std::error_code statError;
+        if (!entry.is_regular_file(statError) || statError)
         {
-            std::error_code statError;
-            if (!entry.is_regular_file(statError) || statError)
-            {
-                continue;
-            }
-            const std::string extension = entry.path().extension().string();
-            if (extension != ".lua")
-            {
-                continue;
-            }
-            std::string relative
-                = std::filesystem::relative(entry.path(), pluginManifest.directory, statError).string();
-            if (statError)
-            {
-                relative = entry.path().filename().string();
-            }
-            files.push_back(HashedFile{.relativePath = std::move(relative), .path = entry.path()});
+            continue;
         }
+        const std::string extension = entry.path().extension().string();
+        if (extension != ".lua")
+        {
+            continue;
+        }
+        std::string relative = std::filesystem::relative(entry.path(), packageDirectory, statError).string();
+        if (statError)
+        {
+            relative = entry.path().filename().string();
+        }
+        files.push_back(HashedFile{.relativePath = std::move(relative), .path = entry.path()});
     }
     std::sort(files.begin(),
         files.end(),
@@ -189,7 +190,7 @@ std::string scriptPluginContentHash(const PluginManifest &pluginManifest)
     {
         std::string readError;
         const std::string manifestBytes
-            = readFileIntoString(pluginManifest.directory / PluginManifestLoader::manifestFileName, readError);
+            = readFileIntoString(packageDirectory / PluginManifestLoader::manifestFileName, readError);
         if (!readError.empty())
         {
             // An unreadable manifest fails the hash computation instead of
@@ -264,6 +265,23 @@ void appendAdvisory(std::vector<ParticipantTrustAdvisory> &advisories, Participa
 
 } // namespace
 
+const ParticipantTrustAdvisory *TrustGate::advisoryFor(const std::string &name, ParticipantKind kind) const
+{
+    for (const ParticipantTrustAdvisory &advisory : advisories_)
+    {
+        if (advisory.name == name && advisory.kind == kind)
+        {
+            return &advisory;
+        }
+    }
+    return nullptr;
+}
+
+std::string TrustGate::scriptPluginBundleDigest(const std::filesystem::path &packageDirectory) const
+{
+    return scriptPluginContentHash(packageDirectory);
+}
+
 // Advisories for plugins: native code, permissions outside capability.*, or a broad
 // capability appetite produce one. The content hash comes from the library
 // (native) or the script bundle.
@@ -294,7 +312,7 @@ void TrustGate::appendPluginRiskWarning(const PluginManifest &pluginManifest, bo
     advisory.kind    = pluginManifest.isNative() ? ParticipantKind::NativePlugin : ParticipantKind::ScriptPlugin;
     advisory.name    = pluginManifest.id;
     advisory.version = pluginManifest.version;
-    advisory.sha256  = isNativePlugin ? nativePluginContentHash(pluginManifest) : scriptPluginContentHash(pluginManifest);
+    advisory.sha256  = isNativePlugin ? nativePluginContentHash(pluginManifest) : scriptPluginContentHash(pluginManifest.directory);
     advisory.reasons = reasons;
     appendAdvisory(advisories_, std::move(advisory), "plugin", warnings);
 }

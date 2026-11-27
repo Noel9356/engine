@@ -168,6 +168,9 @@ public:
 
     void setProfiler(PerformanceProfiler *profiler) noexcept
     {
+        // Workers read the pointer while executing tasks, so a swap while
+        // running takes the same lock the exception handler's setter uses.
+        std::lock_guard lock(mutex_);
         profiler_ = profiler;
     }
 
@@ -441,7 +444,23 @@ public:
     // Blocks until every submitted task completed, helping run tasks meanwhile.
     void waitIdle()
     {
-        const std::uint32_t spinBudget = options_.waitIdleSpinIterations;
+        // A task cannot wait for its own scheduler's idle: the running task
+        // itself holds one outstanding count (decremented only after it
+        // returns), so the idle predicate can never become true while it
+        // waits - the parked worker would never wake (idleCondition_ is
+        // notified from the completion path alone) and stop() would then hang
+        // on the join. Same self-call rule as stop(); a task that needs to
+        // wait for its own batch owns a TaskGroup (whose wait() runs queued
+        // work inline instead of parking).
+        if (currentScheduler_ == this)
+            throw std::logic_error("a task cannot wait for its own scheduler to go idle");
+        // Read under the mutex: waitIdle is legal on a non-running scheduler,
+        // where a concurrent setOptions is still allowed to mutate options_.
+        std::uint32_t spinBudget = 0;
+        {
+            std::lock_guard lock(mutex_);
+            spinBudget = options_.waitIdleSpinIterations;
+        }
         for (;;)
         {
             if (tryRunOne())
@@ -1073,9 +1092,23 @@ public:
         for (std::size_t index = 0; index < nodes_.size(); ++index)
             state->remaining[index].store(nodes_[index].dependencyCount, std::memory_order_relaxed);
 
-        for (std::uint32_t index = 0; index < nodes_.size(); ++index)
-            if (nodes_[index].dependencyCount == 0)
-                enqueueNode(state, index);
+        // The enqueue loop can throw after earlier nodes are already queued
+        // (the std::function copy and the rejection path's make_exception_ptr
+        // both allocate): those queued wrappers capture the stack-local
+        // group, so the group must drain before this frame unwinds - waiting
+        // here keeps every in-flight wrapper's &group valid until the last
+        // one completed, and the original exception surfaces afterwards.
+        try
+        {
+            for (std::uint32_t index = 0; index < nodes_.size(); ++index)
+                if (nodes_[index].dependencyCount == 0)
+                    enqueueNode(state, index);
+        }
+        catch (...)
+        {
+            group.wait(scheduler);
+            throw;
+        }
         group.wait(scheduler);
         if (state->failed.load(std::memory_order_acquire))
             throw std::runtime_error("task graph execution was rejected by the scheduler");
@@ -1122,26 +1155,38 @@ private:
     {
         if (state->failed.load(std::memory_order_acquire))
             return;
-        const Node &node     = state->graph->nodes_[index];
-        const bool  accepted = state->scheduler->schedule(*state->group,
-            [state, index, task = node.task]
-            {
-                if (state->failed.load(std::memory_order_acquire))
-                    return;
-                try
+        const Node &node = state->graph->nodes_[index];
+        bool      accepted = false;
+        try
+        {
+            // The closure copy into the std::function parameter allocates
+            // before schedule's own handling runs, so an allocation failure
+            // here must funnel into the same rejection path below instead
+            // of escaping and leaving the node neither run nor failed.
+            accepted = state->scheduler->schedule(*state->group,
+                [state, index, task = node.task]
                 {
-                    task();
-                }
-                catch (...)
-                {
-                    state->failed.store(true, std::memory_order_release);
-                    state->group->setException(std::current_exception());
-                    return;
-                }
-                for (const std::uint32_t dependent : state->graph->nodes_[index].dependents)
-                    if (state->remaining[dependent].fetch_sub(1, std::memory_order_acq_rel) == 1)
-                        enqueueNode(state, dependent);
-            });
+                    if (state->failed.load(std::memory_order_acquire))
+                        return;
+                    try
+                    {
+                        task();
+                    }
+                    catch (...)
+                    {
+                        state->failed.store(true, std::memory_order_release);
+                        state->group->setException(std::current_exception());
+                        return;
+                    }
+                    for (const std::uint32_t dependent : state->graph->nodes_[index].dependents)
+                        if (state->remaining[dependent].fetch_sub(1, std::memory_order_acq_rel) == 1)
+                            enqueueNode(state, dependent);
+                });
+        }
+        catch (...)
+        {
+            accepted = false;
+        }
         if (!accepted)
         {
             state->failed.store(true, std::memory_order_release);

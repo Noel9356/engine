@@ -81,11 +81,29 @@ bool EngineKernel::gatherParticipants(std::string &report, bool enforceTrust)
         return true;
     }
 
-    // A re-gather tears down any previous assembly first.
-    if (!records_.empty() || !moduleLibraries_.empty())
+    // A re-gather tears down any previous assembly first - but only one that
+    // actually assembled participants: records_ holds the live instances
+    // (and, through them, every loaded library), so an empty records_ means
+    // nothing was constructed and the gather state is safe to rebuild in
+    // place. moduleLibraries_ may still describe (or even hold) libraries
+    // from a validate pass or a failed construct; loadModuleLibraries()
+    // clears and re-scans it below, which is also what releases any still-
+    // mapped .so files (records_ is empty, so no instance references them).
+    // Guarding on moduleLibraries_ instead would run a full stop() - killing
+    // the scheduler and the bus channels - in the middle of the construct
+    // phase, exactly what construct()'s gather-state reset avoids.
+    if (!records_.empty())
     {
         stop();
     }
+
+    // Grants from a previous gather must not carry over: manifests can
+    // change between gathers (a validate pass followed by construct, a
+    // retried construct after a failure), and a same-named participant
+    // whose new manifest declares less would silently keep the old grants.
+    // applyPermissionPass re-declares every current participant below, and
+    // the application record re-grants itself right after.
+    permissionSystem_.clearDeclarations();
 
     if (!applicationRequiredCapabilities.empty())
     {

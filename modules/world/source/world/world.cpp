@@ -583,8 +583,11 @@ private:
             }
             const bool result
                 = module.ecsCapability_->destroyEntity(module.ecsCapability_->self, binding->ecsWorld, internal, error);
-            if (result)
-                module.unbindEntity(*binding, external);
+            // The entity_world side is already gone, so the binding is stale
+            // either way: dropping the rows keeps the slot reusable even when
+            // the ecs destroy fails (a leaked ecs entity, if any, dies with
+            // the world).
+            module.unbindEntity(*binding, external);
             return result;
         };
         ecsFacade_.entityExists = [](void *self, engine::ecs::WorldHandle handle, engine::ecs::Entity entity)

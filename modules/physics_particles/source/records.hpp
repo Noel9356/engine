@@ -26,6 +26,7 @@ struct SlotState
     double jitter[3]    = {0.0, 0.0, 0.0};
     double spawnPosition[3] = {0.0, 0.0, 0.0}; // spawn anchor for the insect wander
     bool   settled      = false; // snow resting on geometry
+    std::uint8_t settleMisses = 0u; // consecutive collision-pass misses while settled
     double settledTime  = 0.0;   // total settle seconds (leaves' brief settle)
     std::uint32_t seed  = 0;
     bool   alive        = false;

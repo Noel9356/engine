@@ -45,7 +45,7 @@ inline float furAlpha(float field, float shellRatio, float densityBoost, float o
 // Mirrors kajiyaKaySpecular() in fur.frag.
 inline float furKajiyaKaySpecular(const glm::vec3 &tangent, const glm::vec3 &view, const glm::vec3 &lightDirection)
 {
-    const glm::vec3 halfVector = glm::normalize(view + lightDirection);
+    const glm::vec3 halfVector = safeNormalize(view + lightDirection);
     const float     tDotH      = glm::clamp(glm::dot(tangent, halfVector), -1.0f, 1.0f);
     const float     sinTH      = std::sqrt(glm::max(1.0f - tDotH * tDotH, 0.0f));
     return std::pow(sinTH, 24.0f);
@@ -81,7 +81,7 @@ inline glm::vec3 furShade(const glm::vec3 &normal, const glm::vec3 &worldPositio
     const glm::vec3 &ambientGround, const glm::vec3 &strandAlbedo, float strandShade,
     const PreparedDirectLight *directLights, std::uint32_t directLightCount)
 {
-    const glm::vec3 view        = glm::normalize(cameraPosition - worldPosition);
+    const glm::vec3 view        = safeNormalize(cameraPosition - worldPosition);
     const float     halfLambert = glm::dot(normal, lightDirection) * 0.5f + 0.5f;
     const glm::vec3 diffuse     = strandAlbedo * (halfLambert * halfLambert) * strandShade;
     const float     sunSpecular = furKajiyaKaySpecular(normal, view, lightDirection) * strandShade;

@@ -232,13 +232,17 @@ bool EngineKernel::declareKnownKeyRegistry(std::string &report)
         {
             if (!configurationStore_.declareKnownConfigKey(configKey))
             {
-                report += "- " + describeComponentKind(record.manifest.kind) + " '" + record.name
+                // Malformed keys are reported but do not abort (see the
+                // comment above): the participant still runs, its own
+                // section reads simply never match the malformed key, and
+                // the note joins the run's warning stream.
+                report += "warning: " + describeComponentKind(record.manifest.kind) + " '" + record.name
                         + "' declares the malformed configuration key '" + configKey
                         + "'; keys are '<section>.<dotted path>' of bare key segments.\n";
             }
         }
     }
-    return report.empty();
+    return true;
 }
 
 // Two-pass reload: parse every input file first (a refusal leaves the
@@ -347,7 +351,11 @@ bool EngineKernel::reloadConfiguration(std::string &report)
         // Nothing to restore into a broken store; the snapshot dies with the
         // reload attempt, matching the previous behavior for its other keys.
         previousScene = toml::table{};
-        configurationLoaded = true;
+        // The store is not reliably loaded here: keep configurationLoaded
+        // false so the next loadConfiguration/validate/construct rebuilds it
+        // from the source files instead of serving a partial document for
+        // the rest of the run.
+        configurationLoaded = false;
         report = "engine reload failed and the previous configuration could not be fully restored:\n- reload error: "
                + reloadError + "\n- restore status: " + (restored ? "partial" : "failed") + "\n";
         return false;
@@ -370,9 +378,17 @@ bool EngineKernel::reloadConfiguration(std::string &report)
     const std::map<std::string, std::string> currentValues = configurationStore_.flattenedValueReprs();
 
     // Denials may have changed; re-run the permission pass for the new
-    // configuration.
+    // configuration. The pass returns the (participant, permission) pairs the
+    // new [permissions].denied list denies - startup and validate report the
+    // same pairs, so a reload that silently dropped them left the operator
+    // with no clue which participants now run with denied permissions.
     permissionSystem_.clearDenials();
-    applyPermissionPass();
+    for (const auto &[deniedRecord, permission] : applyPermissionPass())
+    {
+        report += "- " + describeComponentKind(deniedRecord->manifest.kind) + " '" + deniedRecord->name
+                + "' now requires permission '" + permission
+                + "' which the configuration denies; the denial applies to the running participants.\n";
+    }
 
     std::vector<std::string> changedKeys;
     std::size_t              changedCount = 0;

@@ -146,9 +146,12 @@ struct FluidCapability
     // Simulation LOD: writes the fluid's importance score in [0, 1]. The
     // module maps the score onto the five fidelity bands (Cached, Animation,
     // Procedural, Simplified, Full) with demotion hysteresis; bands below
-    // Full keep the fluid's fixed step size and reduce the internal SPH
-    // substep count instead, and Cached fluids freeze until the score rises
-    // again. Non-finite scores resolve to Cached.
+    // Full reduce the internal SPH substep count (Simplified half,
+    // Procedural a quarter, Animation one), a due step at a reduced cadence
+    // integrates the accumulated fixed deltas in one pass on the band's
+    // substep budget (so the fluid keeps advancing at wall time), and Cached
+    // fluids freeze until the score rises again. Non-finite scores resolve
+    // to Cached.
     bool (*setFluidImportance)(void *self, FluidHandle fluid, double importance);
 };
 

@@ -343,10 +343,16 @@ private:
         }
     }
 
-    bool stepRope(RopeRecord &rope, double fixedDeltaSeconds, std::uint32_t substeps)
+    bool stepRope(RopeRecord &rope, double fixedDeltaSeconds, std::uint32_t substeps, std::uint32_t interval)
     {
         const auto stepStart = std::chrono::steady_clock::now();
-        if (!(fixedDeltaSeconds > 0.0) || fixedDeltaSeconds > 0.1 || !std::isfinite(fixedDeltaSeconds))
+        // The sanity cap applies PER MERGED FIXED STEP: a simulation-LOD due
+        // step legitimately integrates `interval` accumulated fixed deltas
+        // in one pass, so the accepted delta scales with the merge count
+        // (capping the merged delta at the single-step bound would freeze
+        // every Animation-band rope at the default 60 Hz).
+        const double maximumDelta = 0.1 * static_cast<double>(interval > 0u ? interval : 1u);
+        if (!(fixedDeltaSeconds > 0.0) || fixedDeltaSeconds > maximumDelta || !std::isfinite(fixedDeltaSeconds))
         {
             return false;
         }
@@ -454,6 +460,17 @@ private:
             || !std::isfinite(description->damping) || description->damping < 0.0
             || !std::isfinite(description->friction) || description->friction < 0.0 || description->friction > 1.0
             || !std::isfinite(description->breakStrain) || description->breakStrain < 0.0
+            // Body-local attachment anchors reach the pin targets directly
+            // (they rotate into world space every refresh); a non-finite
+            // anchor would NaN the pinned node and roll back every step.
+            // attachNodeToBody validates its anchor; the creation path
+            // must match it for both ends.
+            || !std::isfinite(description->startLocalAnchor[0])
+            || !std::isfinite(description->startLocalAnchor[1])
+            || !std::isfinite(description->startLocalAnchor[2])
+            || !std::isfinite(description->endLocalAnchor[0])
+            || !std::isfinite(description->endLocalAnchor[1])
+            || !std::isfinite(description->endLocalAnchor[2])
             || !std::isfinite(description->start[0]) || !std::isfinite(description->start[1])
             || !std::isfinite(description->start[2]) || !std::isfinite(description->end[0])
             || !std::isfinite(description->end[1]) || !std::isfinite(description->end[2]))
@@ -892,7 +909,8 @@ private:
         {
             return true;
         }
-        if (!stepRope(*rope, fixedDeltaSeconds * static_cast<double>(interval), substepsForBand(rope->lodBand)))
+        if (!stepRope(*rope, fixedDeltaSeconds * static_cast<double>(interval), substepsForBand(rope->lodBand),
+                interval))
         {
             return false;
         }

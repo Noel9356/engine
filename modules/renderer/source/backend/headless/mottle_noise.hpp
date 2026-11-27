@@ -19,6 +19,8 @@
 
 #include "shading_inline.hpp"
 
+#include "finite_math.hpp"
+
 #include <glm/geometric.hpp>
 #include <glm/vec3.hpp>
 
@@ -29,6 +31,24 @@ namespace engine
 {
 namespace renderer
 {
+
+// Entry gate shared by both mottle paths (the scalar albedoModulation and
+// the AVX-512 twin in wide_shading.hpp must accept and reject exactly the
+// same inputs): the isFinite bit tests come FIRST so the whole gate stays
+// NaN-proof under every math-flag combination. A bare negated comparison
+// (`!(scale > 0)`) is enough without -ffinite-math-only, but that flag lets
+// the compiler fold it to `scale <= 0` - which NaN passes - so the bit test
+// is what actually rejects NaN in such units. Non-finite footprints disable
+// the pass too: an Inf footprint previously produced a constant-noise
+// surface (scale collapsed to 0), and NaN flowed into std::max where the
+// fast-math and standard-semantics builds disagree about which operand
+// survives; 1.0 (no modulation) is the deterministic choice every build
+// agrees on.
+inline bool mottleInputsUsable(float baseScaleMeters, float footprintMeters, float strength) noexcept
+{
+    return isFinite(baseScaleMeters) && isFinite(footprintMeters) && isFinite(strength) && baseScaleMeters > 0.0f
+        && strength > 0.0f;
+}
 namespace mottle
 {
 
@@ -51,14 +71,36 @@ inline float latticeValue(std::int32_t x, std::int32_t y, std::int32_t z)
 // Trilinear value noise over the unit lattice: p is the sample position
 // already divided by the octave's wavelength. The smoothstep fade keeps the
 // interpolation C1-continuous so the mottle shows no lattice creases.
+// The lattice cast is domain-guarded: a p component outside the int32 domain
+// (NaN, or an overflow of position * inverse-scale) would make
+// static_cast<int32_t>(floor(p)) undefined behaviour. Every such component
+// fails the range test and the noise returns the neutral 0.5 - which makes
+// albedoModulation return exactly 1.0, i.e. the mottle pass silently disables
+// itself for that sample instead of invoking UB. In-range inputs are
+// bit-identical to the unguarded form (and to the AVX-512 twin, whose
+// _mm512_cvtps_epi32 returns the same INT_MIN for the same garbage but whose
+// belt mirrors this 0.5 neutral so both paths agree everywhere).
 inline float valueNoise3d(const glm::vec3 &p)
 {
-    const std::int32_t ix = static_cast<std::int32_t>(std::floor(p.x));
-    const std::int32_t iy = static_cast<std::int32_t>(std::floor(p.y));
-    const std::int32_t iz = static_cast<std::int32_t>(std::floor(p.z));
-    const float fx = p.x - static_cast<float>(ix);
-    const float fy = p.y - static_cast<float>(iy);
-    const float fz = p.z - static_cast<float>(iz);
+    // Largest float that is <= INT32_MAX after conversion: INT32_MAX itself
+    // is not exactly representable (rounds up to 2^31), so the exact bound is
+    // the next lower representable value, 2^31 - 128.
+    constexpr float kLatticeLimit = 2147483520.0f;
+    const float     flooredX      = std::floor(p.x);
+    const float     flooredY      = std::floor(p.y);
+    const float     flooredZ      = std::floor(p.z);
+    if (!isFinite(flooredX) || !isFinite(flooredY) || !isFinite(flooredZ) || flooredX < -kLatticeLimit
+        || flooredX > kLatticeLimit || flooredY < -kLatticeLimit || flooredY > kLatticeLimit || flooredZ < -kLatticeLimit
+        || flooredZ > kLatticeLimit)
+    {
+        return 0.5f;
+    }
+    const std::int32_t ix = static_cast<std::int32_t>(flooredX);
+    const std::int32_t iy = static_cast<std::int32_t>(flooredY);
+    const std::int32_t iz = static_cast<std::int32_t>(flooredZ);
+    const float fx = p.x - flooredX;
+    const float fy = p.y - flooredY;
+    const float fz = p.z - flooredZ;
     const float fadeX = fx * fx * (3.0f - 2.0f * fx);
     const float fadeY = fy * fy * (3.0f - 2.0f * fy);
     const float fadeZ = fz * fz * (3.0f - 2.0f * fz);
@@ -97,7 +139,7 @@ inline float mottleValue(const glm::vec3 &worldPosition, float baseScaleMeters, 
 inline float albedoModulation(const glm::vec3 &worldPosition, float baseScaleMeters, float footprintMeters,
     float strength)
 {
-    if (baseScaleMeters <= 0.0f || strength <= 0.0f)
+    if (!mottleInputsUsable(baseScaleMeters, footprintMeters, strength))
     {
         return 1.0f;
     }

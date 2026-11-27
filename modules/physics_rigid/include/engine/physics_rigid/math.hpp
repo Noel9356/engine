@@ -222,24 +222,32 @@ inline Mat3 makeRotationMatrix(const Quaternion &a)
     const double y  = a.y;
     const double z  = a.z;
     const double w  = a.w;
-    const double xx = x + x;
-    const double yy = y + y;
-    const double zz = z + z;
-    const double xy = x * yy;
-    const double xz = x * zz;
-    const double xw = x * w;
-    const double yz = y * zz;
-    const double yw = y * w;
-    const double zw = z * w;
+    // Precomputed doubles (row-major transcription matching
+    // multiplyMatrixVector's element[row * 3 + column] reads): the diagonal
+    // terms are 2x^2 / 2y^2 / 2z^2 and the cross terms carry the doubled
+    // quaternion components, so each factor is written as the product of the
+    // component and its doubled sibling (x * (y + y) = 2xy, w * (z + z) =
+    // 2wz, ...). The previous form kept xx/yy/zz at the linear 2x and halved
+    // the w-cross terms, which produced a non-rotation matrix for every
+    // non-identity quaternion.
+    const double xx = x * (x + x);
+    const double yy = y * (y + y);
+    const double zz = z * (z + z);
+    const double xy = x * (y + y);
+    const double xz = x * (z + z);
+    const double wx = w * (x + x);
+    const double yz = y * (z + z);
+    const double wy = w * (y + y);
+    const double wz = w * (z + z);
     Mat3         matrix;
     matrix.elements[0] = 1.0 - (yy + zz);
-    matrix.elements[1] = xy - zw;
-    matrix.elements[2] = xz + yw;
-    matrix.elements[3] = xy + zw;
+    matrix.elements[1] = xy - wz;
+    matrix.elements[2] = xz + wy;
+    matrix.elements[3] = xy + wz;
     matrix.elements[4] = 1.0 - (xx + zz);
-    matrix.elements[5] = yz - xw;
-    matrix.elements[6] = xz - yw;
-    matrix.elements[7] = yz + xw;
+    matrix.elements[5] = yz - wx;
+    matrix.elements[6] = xz - wy;
+    matrix.elements[7] = yz + wx;
     matrix.elements[8] = 1.0 - (xx + yy);
     return matrix;
 }

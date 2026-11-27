@@ -48,6 +48,17 @@ public:
         deniedPermissions.clear();
     }
 
+    // Drops every declared permission and blanket-trust entry (the denial
+    // set stays - it mirrors the configuration, which reloadConfiguration
+    // re-derives). A re-gather re-declares each participant from its
+    // current manifest, so grants from a previous gather - whose manifest
+    // may since have changed - must not silently carry over.
+    void clearDeclarations()
+    {
+        declaredPermissions.clear();
+        trustedComponents.clear();
+    }
+
     // Lists every permission currently declared for a participant (across all
     // declarePermissions calls); empty when the participant is unknown. Order
     // is unspecified; callers that need determinism should sort the result.

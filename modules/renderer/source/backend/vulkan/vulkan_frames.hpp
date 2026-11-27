@@ -43,6 +43,16 @@ public:
     // forever - the caller skips the frame and keeps polling window events,
     // which is what keeps the OS from declaring the window unresponsive.
     bool waitForFrameSlot();
+
+    // Waits (bounded, same caps as waitForFrameSlot) for ONE GIVEN slot's
+    // previous submission, without harvesting timestamps or resetting its
+    // command pool. For callers that must await a submission on a slot the
+    // scheduler has already rotated past - the pipeline warm-up, whose
+    // endFrame advanced currentFrame before it needed to wait the frame it
+    // just submitted (waitForFrameSlot would wait the WRONG slot: the next
+    // one, whose fence covers a submission from framesInFlight frames ago
+    // or nothing at all).
+    bool waitForSlotRetirement(std::uint32_t slot);
     void resetFrameSlotFence(); // unfence the slot just before resubmitting
 
     // GPU timing: vkCmdWriteTimestamp at top/bottom of pipe around the frame,
@@ -93,6 +103,15 @@ public:
     }
 
     void rotate();
+
+    // Replaces the current slot's acquire-side semaphore with a fresh,
+    // unsignaled one. For skip paths that acquired an image but never
+    // submitted: the acquire signaled the binary semaphore and nothing will
+    // wait it, and vkAcquireNextImageKHR requires the semaphore it receives
+    // to be unsignaled - reusing the signaled handle is undefined. Legal
+    // here because the slot's previous submission (the only waiter of this
+    // semaphore) retired at the waitForFrameSlot that opened beginFrame.
+    void resetImageAvailableSemaphore();
 
     void waitForAll();
 

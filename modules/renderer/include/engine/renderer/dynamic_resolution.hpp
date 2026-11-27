@@ -11,10 +11,40 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 
 namespace engine::renderer
 {
+
+namespace detail
+{
+// Flag-proof finiteness test, same technique as the module-internal
+// finite_math.hpp (duplicated here because this is a PUBLIC header and must
+// stay self-contained): the module's own translation units are not compiled
+// with -ffinite-math-only, but an APPLICATION that includes this header may
+// compile its own units with -ffast-math - and under that flag GCC folds
+// std::isfinite(x) to constant true, which would let a NaN setting pass
+// setSettings' validation and poison scale_ (std::clamp keeps NaN, so the
+// NaN reaches every render-target size computation). Reading the exponent
+// bits through a memcpy re-interpretation cannot be folded under any math
+// flag combination.
+[[nodiscard]] inline bool finiteFloat(double value) noexcept
+{
+    static_assert(sizeof(double) == sizeof(std::uint64_t), "IEEE-754 binary64 double expected");
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return (bits & 0x7FF0000000000000ull) != 0x7FF0000000000000ull;
+}
+
+[[nodiscard]] inline bool finiteFloat(float value) noexcept
+{
+    static_assert(sizeof(float) == sizeof(std::uint32_t), "IEEE-754 binary32 float expected");
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return (bits & 0x7F800000u) != 0x7F800000u;
+}
+} // namespace detail
 
 // All times are milliseconds; scales are multipliers of the full resolution
 // (1.0 = native). Validated in setSettings, which throws on invalid input.
@@ -53,15 +83,18 @@ public:
     }
 
     // Throws std::invalid_argument when any setting is non-finite/out of
-    // range (scales must be within (0, 1], minimum <= maximum, etc.).
+    // range (scales must be within (0, 1], minimum <= maximum, etc.). The
+    // finiteness arm uses the bit-level test above so the validation keeps
+    // working when the including translation unit is compiled with
+    // -ffast-math/-ffinite-math-only.
     void setSettings(DynamicResolutionSettings settings)
     {
-        const bool valid = std::isfinite(settings.targetGpuMilliseconds) && settings.targetGpuMilliseconds > 0.0
-                        && std::isfinite(settings.minimumScale) && std::isfinite(settings.maximumScale)
+        const bool valid = detail::finiteFloat(settings.targetGpuMilliseconds) && settings.targetGpuMilliseconds > 0.0
+                        && detail::finiteFloat(settings.minimumScale) && detail::finiteFloat(settings.maximumScale)
                         && settings.minimumScale > 0.0f && settings.maximumScale >= settings.minimumScale
-                        && settings.maximumScale <= 1.0f && std::isfinite(settings.scaleStep)
-                        && settings.scaleStep > 0.0f && std::isfinite(settings.smoothingTimeSeconds)
-                        && settings.smoothingTimeSeconds > 0.0 && std::isfinite(settings.hysteresisFraction)
+                        && settings.maximumScale <= 1.0f && detail::finiteFloat(settings.scaleStep)
+                        && settings.scaleStep > 0.0f && detail::finiteFloat(settings.smoothingTimeSeconds)
+                        && settings.smoothingTimeSeconds > 0.0 && detail::finiteFloat(settings.hysteresisFraction)
                         && settings.hysteresisFraction >= 0.0f && settings.hysteresisFraction < 0.5f
                         && settings.recoveryFrames > 0;
         if (!valid)
@@ -86,7 +119,7 @@ public:
 
     void reset(float scale = 1.0f) noexcept
     {
-        if (!std::isfinite(scale))
+        if (!detail::finiteFloat(scale))
             scale = settings_.maximumScale;
         scale_ = std::clamp(scale, settings_.minimumScale, settings_.maximumScale);
         resetFilter();
@@ -96,7 +129,7 @@ public:
     // ignored and return the current state unchanged.
     [[nodiscard]] DynamicResolutionSample update(double gpuMilliseconds, double deltaSeconds)
     {
-        if (!std::isfinite(gpuMilliseconds) || gpuMilliseconds <= 0.0 || !std::isfinite(deltaSeconds)
+        if (!detail::finiteFloat(gpuMilliseconds) || gpuMilliseconds <= 0.0 || !detail::finiteFloat(deltaSeconds)
             || deltaSeconds <= 0.0)
             return {scale_, smoothedGpuMilliseconds_, false};
 
@@ -206,10 +239,10 @@ public:
     {
         const auto validPreset
             = [](QualityPreset value) { return value >= QualityPreset::Low && value <= QualityPreset::Ultra; };
-        if (!std::isfinite(settings.targetCpuMilliseconds) || settings.targetCpuMilliseconds <= 0.0
-            || !std::isfinite(settings.targetGpuMilliseconds) || settings.targetGpuMilliseconds <= 0.0
-            || !std::isfinite(settings.overloadFraction) || settings.overloadFraction < 0.0
-            || settings.overloadFraction >= 1.0 || !std::isfinite(settings.headroomFraction)
+        if (!detail::finiteFloat(settings.targetCpuMilliseconds) || settings.targetCpuMilliseconds <= 0.0
+            || !detail::finiteFloat(settings.targetGpuMilliseconds) || settings.targetGpuMilliseconds <= 0.0
+            || !detail::finiteFloat(settings.overloadFraction) || settings.overloadFraction < 0.0
+            || settings.overloadFraction >= 1.0 || !detail::finiteFloat(settings.headroomFraction)
             || settings.headroomFraction <= 0.0 || settings.headroomFraction >= 1.0
             || !validPreset(settings.minimumPreset) || !validPreset(settings.maximumPreset)
             || settings.minimumPreset > settings.maximumPreset || settings.degradeAfterFrames == 0
@@ -241,8 +274,8 @@ public:
     [[nodiscard]] AdaptiveQualitySample update(
         double cpuMilliseconds, double gpuMilliseconds, bool gpuTimingAvailable) noexcept
     {
-        const bool cpuValid = std::isfinite(cpuMilliseconds) && cpuMilliseconds > 0.0;
-        const bool gpuValid = gpuTimingAvailable && std::isfinite(gpuMilliseconds) && gpuMilliseconds > 0.0;
+        const bool cpuValid = detail::finiteFloat(cpuMilliseconds) && cpuMilliseconds > 0.0;
+        const bool gpuValid = gpuTimingAvailable && detail::finiteFloat(gpuMilliseconds) && gpuMilliseconds > 0.0;
         if (!cpuValid && !gpuValid)
             return {preset_, PerformanceBottleneck::Unknown, false, false, false};
 

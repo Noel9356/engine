@@ -4,7 +4,7 @@ file_asset_store gives the engine a bounded, reference-counted cache of whole fi
 
 ## Capability
 
-The module provides the `file_asset_store` capability, ABI constant `fileAssetStoreCapabilityAbi = 5`, declared in `modules/file_asset_store/include/engine/file_asset_store/capabilities.hpp`. A second public header, `modules/file_asset_store/include/engine/file_asset_store/catalog.hpp`, exposes the catalog/cook primitives (built as the static `engine_asset_catalog` library) for offline tooling; the module .so itself is `engine_module_file_asset_store`.
+The module provides the `file_asset_store` capability, ABI constant `fileAssetStoreCapabilityAbi = 6`, declared in `modules/file_asset_store/include/engine/file_asset_store/capabilities.hpp`. A second public header, `modules/file_asset_store/include/engine/file_asset_store/catalog.hpp`, exposes the catalog/cook primitives (built as the static `engine_asset_catalog` library) for offline tooling; the module .so itself is `engine_module_file_asset_store`.
 
 Key capability facts:
 

@@ -54,7 +54,7 @@ From `module.toml` and the entry table at the bottom of `source/physics_rope.cpp
 
 ## How it works
 
-**Creation.** `createRope` validates the chain (at least one segment), rest length, node radius, mass, compliances, damping, friction range, and break strain, probes attached ends through `copyBodyState` when either end attaches to a body, reads the target world's gravity through `copyWorldGravity` (falling back to `0, -9.81, 0` when the read fails), builds the node arrays, generates the constraint list, and flags the description's pinned or attached ends (zeroing their inverse masses and seeding the anchors) before the handle is published.
+**Creation.** `createRope` validates the chain (at least one segment), rest length, node radius, mass, compliances, damping, friction range, and break strain, probes attached ends through `copyBodyState` when either end attaches to a body, reads the target world's gravity through `copyWorldGravity` (rejecting the rope with `InvalidHandle` when the read fails, which doubles as the world-handle check), builds the node arrays, generates the constraint list, and flags the description's pinned or attached ends (zeroing their inverse masses and seeding the anchors) before the handle is published.
 
 **Stepping.** `stepRope` runs the substep loop described above and aborts (returning false without counting the step) when any node position becomes non-finite. The statistics counters accumulate steps, substeps, the contact count of the previous step, and the previous step's wall-clock cost. `simulate` mirrors the rigid module's accumulator: whole steps at the configured rate, budget clamp, and zero-budget reset when the step cap trips so a stalled consumer never accumulates debt.
 

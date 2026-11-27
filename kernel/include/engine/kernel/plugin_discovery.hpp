@@ -52,10 +52,13 @@ struct NativePluginLoad
     const EnginePluginEntryTable  *entryTable      = nullptr;
 };
 
-// Loads the package's library, checks the interface version and the
-// compiled manifest name; on failure report explains and load stays
+// Loads the package's library (re-verifying expectedSha256 - the digest the
+// trust gate computed at discovery time; empty when none was recorded, in
+// which case no re-verification is possible), checks the interface version
+// and the compiled manifest name; on failure report explains and load stays
 // cleared.
-bool loadNativePluginEntry(const DiscoveredPluginPackage &package, NativePluginLoad &load, std::string &report);
+bool loadNativePluginEntry(const DiscoveredPluginPackage &package, const std::string &expectedSha256,
+    NativePluginLoad &load, std::string &report);
 
 } // namespace engine
 

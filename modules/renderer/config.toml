@@ -34,6 +34,7 @@ draw_sort_mode                          = "mesh_material"
 # silhouette that softens the one-texel step a straight edge keeps when it
 # lands between supersample columns (0 keeps the along-edge blend only; the
 # default targets half a texel at strong contrast).
+film_aa                                = false
 film_aa_strength                        = 1.0
 frustum_culling                         = true
 fur_enabled                             = true
@@ -71,6 +72,11 @@ headless_pixels_per_lock_group          = 16
 # ramp the way a sensor's optical low-pass filter does. false restores the
 # plain box average.
 headless_resolve_tent                   = true
+# 16-lane AVX-512 shading and presentation runs (wide_shading.hpp /
+# wide_presentation.hpp): on when the key is absent, and the backend itself
+# gates on the running CPU's AVX-512 foundation, so the flag is safe to
+# leave on everywhere a binary with the kernel ships.
+headless_wide_runs                      = true
 headless_tile_pixels                    = 64
 # The per-draw tile path (headless_tile_parallel) has no entry here on
 # purpose: its default adapts to the machine (on from four logical

@@ -73,21 +73,29 @@ private:
     bool          directLightsInitialized = false;
     std::array<direct_lighting::DirectLight, direct_lighting::maxDirectLights> directLightScratch{};
 
-    // radiance_cache probe grid.
-    std::uint64_t                  probeGridVersion     = 0;
-    bool                           probeGridInitialized = false;
+    // radiance_cache probe grid. probeGridLastEnabled tracks the disable
+    // transition: a feed that went quiet after it was live must clear the
+    // backend's last snapshot once (a stale grid would otherwise keep
+    // lighting every later frame as if the provider still published).
+    std::uint64_t                  probeGridVersion      = 0;
+    bool                           probeGridInitialized  = false;
+    bool                           probeGridLastEnabled = false;
     std::vector<radiance_cache::GiProbe> probeScratch{};
     radiance_cache::GiProbeHeader        probeHeader{};
 
-    // reflection_field field.
-    std::uint64_t                             reflectionFieldVersion     = 0;
-    bool                                      reflectionFieldInitialized = false;
+    // reflection_field field. reflectionFieldLastEnabled tracks the disable
+    // transition for the same reason as the probe grid's flag.
+    std::uint64_t                             reflectionFieldVersion      = 0;
+    bool                                      reflectionFieldInitialized  = false;
+    bool                                      reflectionFieldLastEnabled = false;
     std::vector<float>                        reflectionScratch{};
     reflection_field::ReflectionFieldHeader   reflectionHeader{};
 
-    // radiance_cache gather field.
-    std::uint64_t                          gatherFieldVersion     = 0;
-    bool                                   gatherFieldInitialized = false;
+    // radiance_cache gather field. gatherFieldLastEnabled tracks the disable
+    // transition for the same reason as the probe grid's flag.
+    std::uint64_t                          gatherFieldVersion      = 0;
+    bool                                   gatherFieldInitialized  = false;
+    bool                                   gatherFieldLastEnabled = false;
     std::vector<float>                     gatherScratch{};
     radiance_cache::RadianceGatherHeader   gatherHeader{};
 };

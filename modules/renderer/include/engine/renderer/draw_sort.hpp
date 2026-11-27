@@ -77,7 +77,30 @@ inline int compareRenderMaterialValues(const MeshMaterial &lhs, const MeshMateri
         return depthResult;
     if ((result = compareFloat(lhs.opacity, rhs.opacity)) != 0)
         return result;
-    return compareFloat(lhs.indexOfRefraction, rhs.indexOfRefraction);
+    if ((result = compareFloat(lhs.indexOfRefraction, rhs.indexOfRefraction)) != 0)
+        return result;
+    // The append-only material tail: sheen selects the cloth lobe blend,
+    // doubleSided the two-sided pipeline variant and winding flip,
+    // frontFaceWinding the per-triangle cull sign, the noise pair the
+    // mottle pass, and the fog triple the aerial-perspective blend. Every
+    // one of them changes the shaded output, so a run folded by the
+    // batcher must agree on all of them (drawMeshInstances draws the
+    // whole run with the FIRST command's material).
+    if ((result = compareFloat(lhs.sheenFactor, rhs.sheenFactor)) != 0)
+        return result;
+    if ((result = compareInteger(lhs.doubleSided, rhs.doubleSided)) != 0)
+        return result;
+    if ((result = compareFloat(lhs.frontFaceWinding, rhs.frontFaceWinding)) != 0)
+        return result;
+    if ((result = compareFloat(lhs.noiseScaleMeters, rhs.noiseScaleMeters)) != 0)
+        return result;
+    if ((result = compareFloat(lhs.noiseStrength, rhs.noiseStrength)) != 0)
+        return result;
+    if ((result = compareFloatArray(lhs.fogColor, rhs.fogColor, 3)) != 0)
+        return result;
+    if ((result = compareFloat(lhs.fogScaleMeters, rhs.fogScaleMeters)) != 0)
+        return result;
+    return compareFloat(lhs.fogAsymptote, rhs.fogAsymptote);
 }
 
 // The material a draw uses when its MeshMaterial* is null (identity PBR).
@@ -139,6 +162,19 @@ inline std::uint64_t renderDrawCommandSortSignature(
         mix(static_cast<std::uint64_t>(material.depthWrite));
         mixFloat(material.opacity);
         mixFloat(material.indexOfRefraction);
+        // The comparator's append-only tail (see compareRenderMaterialValues):
+        // a frame whose materials differ only in these fields still sorts
+        // differently, so the signature must cover them or the cached
+        // permutation would be reused with a stale order.
+        mixFloat(material.sheenFactor);
+        mix(static_cast<std::uint64_t>(material.doubleSided));
+        mixFloat(material.frontFaceWinding);
+        mixFloat(material.noiseScaleMeters);
+        mixFloat(material.noiseStrength);
+        for (const float component : material.fogColor)
+            mixFloat(component);
+        mixFloat(material.fogScaleMeters);
+        mixFloat(material.fogAsymptote);
     }
     return hash;
 }

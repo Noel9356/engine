@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "finite_math.hpp"
 #include "shading_inline.hpp"
 
 #include <engine/radiance_cache/capabilities.hpp>
@@ -31,6 +32,13 @@ inline constexpr std::uint32_t maxGiProbes = 2u * 9u * 9u * 9u;
 // Floats per probe in the packed storage-buffer/std430 record: 1x vec4
 // (position.xyz + validity) + 7x vec4 (the 27 SH2 floats plus one pad).
 inline constexpr std::uint32_t giProbeRecordVec4s = 8u;
+// The same record measured in FLOATS - the unit the CPU-side packing and
+// verification actually count in (the Vulkan backend's setProbeGrid pushes
+// exactly this many floats per probe, and sameProbeGrid compares the packed
+// stream's size and record stride against it). Kept next to its vec4 twin so
+// the two units cannot drift apart again: the verification previously
+// compared against the vec4 count and could never match the packing.
+inline constexpr std::uint32_t giProbeRecordFloats = giProbeRecordVec4s * 4u;
 
 // One level of the exported probe cache: a regular dims^3 lattice anchored at
 // anchor with uniform spacing, index = x + dims.x * (y + dims.y * z), the
@@ -72,6 +80,50 @@ struct GiProbeGrid
     }
 };
 
+// Full validation of a provider-owned GiProbeHeader against the snapshot's
+// real probe array: every consumer of the lattice walk (the CPU twin below,
+// the Vulkan upload's headerUsable gate) runs this one predicate so the two
+// backends accept exactly the same headers.
+//
+// The checks it runs, and why each one exists:
+// - all three dimensions of both levels must be >= 2: the trilinear walk
+//   clamps its base corner into [0, dims - 2] per axis, and an axis below 2
+//   inverts that clamp's bounds (min > max), turning the walk degenerate.
+//   The first-party provider exports cubic odd dimensions (never below 3
+//   once usable), but the header is capability data - any provider selected
+//   under [providers] must be validated, not trusted.
+// - level0ProbeOffset < level1ProbeOffset: the exported layout places level
+//   1 after level 0; the inverse order used to underflow the level-0 span
+//   subtraction the old check performed.
+// - each level's lattice must fit inside the snapshot: offset + dims product
+//   (counted in 64 bits) <= probeCount. This bounds every index the walk
+//   computes - `x + dims.x * (y + dims.y * z)` - inside the real array, so a
+//   header claiming huge dimensions can no longer overflow the int
+//   arithmetic of the index expression (signed overflow is undefined
+//   behaviour and, under the rasterizer unit's optimization flags, could
+//   legally delete the probeCount bounds check that follows it).
+inline bool giProbeHeaderUsable(const radiance_cache::GiProbeHeader &header, std::uint32_t probeCount)
+{
+    for (std::uint32_t axis = 0; axis < 3u; ++axis)
+    {
+        if (header.level0Dimensions[axis] < 2u || header.level1Dimensions[axis] < 2u)
+        {
+            return false;
+        }
+    }
+    if (header.level0ProbeOffset >= header.level1ProbeOffset)
+    {
+        return false;
+    }
+    const auto levelFits = [probeCount](std::uint32_t offset, const std::uint32_t (&dimensions)[3])
+    {
+        const std::uint64_t cellCount = static_cast<std::uint64_t>(dimensions[0]) * dimensions[1] * dimensions[2];
+        return static_cast<std::uint64_t>(offset) + cellCount <= static_cast<std::uint64_t>(probeCount);
+    };
+    return levelFits(header.level0ProbeOffset, header.level0Dimensions)
+        && levelFits(header.level1ProbeOffset, header.level1Dimensions);
+}
+
 // Builds both level descriptors from the snapshot's header and probe array;
 // backends call this once per setProbeGrid so per-pixel shading can pick a
 // level without re-reading probe positions. levelsBuilt reports whether the
@@ -80,13 +132,7 @@ inline bool buildProbeLevels(GiProbeGrid &grid)
 {
     const radiance_cache::GiProbeHeader &header = grid.header;
     grid.levelsBuilt                      = false;
-    if (!grid.valid() || header.level0Dimensions[0] < 2u || header.level1Dimensions[0] < 2u)
-    {
-        return false;
-    }
-    const std::uint32_t level0Count = header.level1ProbeOffset - header.level0ProbeOffset;
-    if (header.level0ProbeOffset >= grid.probeCount || level0Count == 0
-        || header.level1ProbeOffset >= grid.probeCount)
+    if (!grid.valid() || !giProbeHeaderUsable(header, grid.probeCount))
     {
         return false;
     }
@@ -261,8 +307,28 @@ ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid
     // so its products are computed once here.
     const Sh2Basis basis = sh2BasisFor(normal);
 
-    const glm::vec3 cell     = (position - level.anchor) / level.spacing;
-    const glm::ivec3 base    = glm::clamp(glm::ivec3(glm::floor(cell)), glm::ivec3(0), level.dims - glm::ivec3(2));
+    const glm::vec3 cell = (position - level.anchor) / level.spacing;
+    // Safe lattice-corner conversion (the V3 belt class): glm::ivec3 of a
+    // floored component is undefined behaviour for a non-finite value (a
+    // NaN/Inf probe anchor or spacing - provider data buildProbeLevels reads
+    // raw, and its std::max(spacing, 1e-5) guard passes NaN through) or for
+    // one outside the int32 domain (an extreme but finite world position;
+    // mesh vertices and model matrices are validated for finiteness, not
+    // magnitude, so a draw at 1e30 meters reaches this walk). Non-finite
+    // components keep the documented no-valid-probes fallback; a huge finite
+    // component clamps in FLOAT space to the same boundary corner the dims
+    // clamp targets - the "clamps to the boundary probes" contract. (The
+    // old out-of-range conversion collapsed to INT_MIN, which the clamp then
+    // pinned to the ORIGIN corner for positive overflow - the wrong corner.)
+    // In-range inputs are bit-identical: floor-then-clamp equals the old
+    // cast-then-clamp for every component already inside [0, dims - 2].
+    const glm::vec3 flooredCell = glm::floor(cell);
+    if (!isFinite(flooredCell.x) || !isFinite(flooredCell.y) || !isFinite(flooredCell.z))
+    {
+        return false;
+    }
+    const glm::vec3 maxBase = glm::vec3(level.dims - glm::ivec3(2));
+    const glm::ivec3 base = glm::ivec3(glm::clamp(flooredCell, glm::vec3(0.0f), maxBase));
     const glm::vec3 fraction = glm::clamp(cell - glm::vec3(base), 0.0f, 1.0f);
 
     // The irradiance sum evaluates each valid probe corner against the shared

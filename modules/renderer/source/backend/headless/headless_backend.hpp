@@ -44,6 +44,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <new>
 #include <unordered_map>
 #include <vector>
 
@@ -363,8 +364,10 @@ public:
           wideRunsActive_(options.wideRunsEnabled && wideshading::avx512Available()),
           taskScheduler_(options.taskScheduler),
           window_(windowCapability),
+          parallelTriangleThreshold_(options.parallelTriangleThreshold),
           bandSplitTriangleThreshold_(options.bandSplitTriangleThreshold),
           bandSplitMinimumScreenFraction_(options.bandSplitMinimumScreenFraction),
+          pixelsPerLockGroup_(options.pixelsPerLockGroup),
           lodMinTriangles_(options.lodMinTriangles),
           parallelTransformVertexThreshold_(options.parallelTransformVertexThreshold),
           lodStrides_(options.lodStrides),
@@ -452,7 +455,30 @@ public:
     // rebuilt here so per-pixel shading reads ready-made constants.
     void setProbeGrid(const GiProbeGrid &grid) override
     {
-        probeGridProbes_.assign(grid.probes, grid.probes + grid.probeCount);
+        // The documented invalid snapshot is {nullptr, 0}; a non-zero count
+        // with a null pointer is an upstream contract violation and is
+        // rejected (kept as the previous snapshot) instead of reading
+        // through null.
+        if (grid.probes == nullptr && grid.probeCount != 0)
+        {
+            return;
+        }
+        // Copy into a fresh buffer and swap on success: the snapshot copy is
+        // the one allocation in this setter, and an allocation failure must
+        // keep the previous snapshot (the frame_inputs feeder's documented
+        // keep-previous semantics) instead of throwing std::bad_alloc through
+        // the renderer capability boundary into the application's frame
+        // loop.
+        std::vector<radiance_cache::GiProbe> incoming;
+        try
+        {
+            incoming.assign(grid.probes, grid.probes + grid.probeCount);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return;
+        }
+        probeGridProbes_ = std::move(incoming);
         GiProbeGrid copied;
         copied.header     = grid.header;
         copied.probeCount = grid.probeCount;
@@ -471,21 +497,36 @@ public:
     // specular-only shading.
     void setReflectionField(const ReflectionField &field) override
     {
-        reflectionField_      = ReflectionField{};
-        reflectionRadiance_.clear();
-        if (field.valid())
+        if (!field.valid())
         {
-            // The borrowed field is interleaved texels (radiance RGB +
-            // roughness; see reflectionFieldTexelFloats), so the copy keeps
-            // the whole stride and the pixel-path sampler indexes it the
-            // same way.
-            const std::size_t texelCount
-                = static_cast<std::size_t>(field.header.width) * field.header.height;
-            reflectionRadiance_.assign(
-                field.radiance, field.radiance + texelCount * reflection_field::reflectionFieldTexelFloats);
-            reflectionField_.header = field.header;
-            reflectionField_.radiance = reflectionRadiance_.data();
+            reflectionField_           = ReflectionField{};
+            reflectionRadiance_.clear();
+            preparedReflectionField_   = PreparedReflectionField{};
+            return;
         }
+        // The borrowed field is interleaved texels (radiance RGB +
+        // roughness; see reflectionFieldTexelFloats), so the copy keeps the
+        // whole stride and the pixel-path sampler indexes it the same way.
+        // The copy lands in a fresh buffer first and swaps in on success: an
+        // allocation failure keeps the previous snapshot (the frame_inputs
+        // feeder's documented keep-previous semantics) instead of throwing
+        // std::bad_alloc through the renderer capability boundary into the
+        // application's frame loop.
+        const std::size_t texelCount
+            = static_cast<std::size_t>(field.header.width) * field.header.height;
+        std::vector<float> incoming;
+        try
+        {
+            incoming.assign(
+                field.radiance, field.radiance + texelCount * reflection_field::reflectionFieldTexelFloats);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return;
+        }
+        reflectionRadiance_      = std::move(incoming);
+        reflectionField_.header = field.header;
+        reflectionField_.radiance = reflectionRadiance_.data();
         // Prepared once per snapshot: the field's view-projection, so the
         // per-pixel bilinear sample stops rebuilding the matrix.
         preparedReflectionField_ = prepareReflectionField(reflectionField_);
@@ -498,20 +539,37 @@ public:
     // the probe-walk ambient bit-identical.
     void setGatherField(const GatherField &field) override
     {
-        gatherField_      = GatherField{};
-        gatherIrradiance_.clear();
-        if (field.valid())
+        if (!field.valid())
         {
-            // The borrowed field is interleaved texels (irradiance RGB +
-            // validity; see radianceGatherTexelFloats), so the copy keeps
-            // the whole stride and the sampler indexes it the same way.
-            const std::size_t texelCount
-                = static_cast<std::size_t>(field.header.width) * field.header.height;
-            gatherIrradiance_.assign(
-                field.irradiance, field.irradiance + texelCount * radiance_cache::radianceGatherTexelFloats);
-            gatherField_.header    = field.header;
-            gatherField_.irradiance = gatherIrradiance_.data();
+            gatherField_            = GatherField{};
+            gatherIrradiance_.clear();
+            preparedGatherField_    = PreparedGatherField{};
+            preparedGatherField_.occlusionStrength = gatherOcclusionStrength_;
+            return;
         }
+        // The borrowed field is interleaved texels (irradiance RGB +
+        // validity; see radianceGatherTexelFloats), so the copy keeps the
+        // whole stride and the sampler indexes it the same way. The copy
+        // lands in a fresh buffer first and swaps in on success: an
+        // allocation failure keeps the previous snapshot (the frame_inputs
+        // feeder's documented keep-previous semantics) instead of throwing
+        // std::bad_alloc through the renderer capability boundary into the
+        // application's frame loop.
+        const std::size_t texelCount
+            = static_cast<std::size_t>(field.header.width) * field.header.height;
+        std::vector<float> incoming;
+        try
+        {
+            incoming.assign(
+                field.irradiance, field.irradiance + texelCount * radiance_cache::radianceGatherTexelFloats);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return;
+        }
+        gatherIrradiance_         = std::move(incoming);
+        gatherField_.header    = field.header;
+        gatherField_.irradiance = gatherIrradiance_.data();
         // Prepared once per snapshot: the field's view-projection, so the
         // per-pixel bilinear sample stops rebuilding the matrix.
         preparedGatherField_      = prepareGatherField(gatherField_);
@@ -642,6 +700,12 @@ private:
         // intact (an eligibility CALL per record measurably regressed the
         // inlined per-sample core's codegen).
         bool          shadeRuns = false;
+        // Top-left fill rule bits (see fillRuleBitsFor): bit0 = the edge
+        // opposite corner 0 accepts boundary pixels, bit1 = edge opposite
+        // corner 1, bit2 = edge opposite corner 2. Computed at emission from
+        // the screen-space corners; the coverage tests turn the inclusive
+        // >= 0 check strict for the edges the rule assigns to the neighbour.
+        std::uint8_t fillRuleBits = 0;
     };
 
     struct StripResult
@@ -940,7 +1004,6 @@ private:
         std::size_t triEnd, bool useAtomicDepth, StripResult *outResult, std::uint32_t yBandBegin = 0,
         std::uint32_t yBandEnd = 0xFFFFFFFFu);
 
-    void rasterizeMesh(const HeadlessMesh &mesh, const float *modelMatrix, const MeshMaterial &material);
 
     // Textures resolve to neutral stand-ins instead of failing; `neutral`
     // picks which stand-in (white vs flat normal) fits the slot.

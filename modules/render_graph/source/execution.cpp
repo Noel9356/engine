@@ -34,55 +34,90 @@ bool ExecutionCache::enabled() const noexcept
 
 bool ExecutionCache::execute(const std::shared_ptr<const RenderGraphPlan> &planOwner, const RenderGraphPlan &plan,
     std::uint32_t passCount, RenderGraphExecuteCallback callback, void *userData, TaskScheduler &scheduler,
-    RenderGraphError &outError) const
+    RenderGraphError &outError, const std::vector<std::pair<std::uint32_t, std::uint32_t>> *extraEdges) const
 {
     // Only cache-owned plans can keep the cached TaskGraph alive safely.
     if (!enabled_.load(std::memory_order_relaxed) || !planOwner)
-        return runPerCall(plan, passCount, callback, userData, scheduler, outError);
+        return runPerCall(plan, passCount, callback, userData, scheduler, outError, extraEdges);
 
     bool cacheBusy = false;
     {
         std::lock_guard lock(mutex_);
         cacheBusy = cache_.executing.exchange(true, std::memory_order_acq_rel);
-        if (!cacheBusy)
-        {
-            // runCached always clears the executing flag before returning; the
-            // lock releases with this scope.
-            return runCached(cache_, planOwner, plan, passCount, callback, userData, scheduler, outError);
-        }
     }
-    // Cache busy (concurrent caller): fall back to a per-call graph.
-    return runPerCall(plan, passCount, callback, userData, scheduler, outError);
+    if (cacheBusy)
+    {
+        // Cache busy (concurrent caller): fall back to a per-call graph.
+        return runPerCall(plan, passCount, callback, userData, scheduler, outError, extraEdges);
+    }
+    // The owner proceeds with the mutex released: the cached TaskGraph's
+    // execution is synchronous (TaskGraph::execute waits for every pass on
+    // the calling thread, and its workers may re-enter this path), so
+    // holding the mutex across it would serialize concurrent callers the
+    // flag promises a fallback for and deadlock a re-entrant one. Ownership
+    // of the cache is serialized by the executing flag alone - only the
+    // owner ever mutates the cached graph or its bindings, and a caller
+    // that observes the flag busy never touches them.
+    return runCached(cache_, planOwner, plan, passCount, callback, userData, scheduler, outError, extraEdges);
 }
 
 bool ExecutionCache::runCached(CachedExecution &cache, const std::shared_ptr<const RenderGraphPlan> &planOwner,
     const RenderGraphPlan &plan, std::uint32_t passCount, RenderGraphExecuteCallback callback, void *userData,
-    TaskScheduler &scheduler, RenderGraphError &outError) const
+    TaskScheduler &scheduler, RenderGraphError &outError,
+    const std::vector<std::pair<std::uint32_t, std::uint32_t>> *extraEdges) const
 {
     if (cache.plan.get() != &plan)
     {
-        cache.graph.reset();
-        cache.nodeForPass.assign(passCount, invalidResourceSlot);
-        cache.bindings          = std::make_shared<ExecutionBindings>();
-        std::vector<std::uint32_t> &nodes = cache.nodeForPass;
-        for (std::uint32_t pass = 0; pass < passCount; ++pass)
-            nodes[pass] = cache.graph.addTask(
-                [bindings = cache.bindings, pass]
+        try
+        {
+            cache.graph.reset();
+            cache.nodeForPass.assign(passCount, invalidResourceSlot);
+            cache.bindings          = std::make_shared<ExecutionBindings>();
+            std::vector<std::uint32_t> &nodes = cache.nodeForPass;
+            for (std::uint32_t pass = 0; pass < passCount; ++pass)
+                nodes[pass] = cache.graph.addTask(
+                    [bindings = cache.bindings, pass]
+                    {
+                        const RenderGraphExecuteCallback currentCallback = bindings->callback;
+                        void                            *currentUserData = bindings->userData;
+                        if (currentCallback != nullptr)
+                            currentCallback(currentUserData, pass);
+                    });
+            for (const auto &[prerequisite, dependent] : plan.edges)
+                if (!cache.graph.addDependency(nodes[prerequisite], nodes[dependent]))
                 {
-                    const RenderGraphExecuteCallback currentCallback = bindings->callback;
-                    void                            *currentUserData = bindings->userData;
-                    if (currentCallback != nullptr)
-                        currentCallback(currentUserData, pass);
-                });
-        for (const auto &[prerequisite, dependent] : plan.edges)
-            if (!cache.graph.addDependency(nodes[prerequisite], nodes[dependent]))
+                    cache.release();
+                    cache.executing.store(false, std::memory_order_release);
+                    outError = RenderGraphError::InvalidInput;
+                    return false;
+                }
+            // The aliasing handoff edges join the plan's own hazard edges: a
+            // slot's previous owner must finish before the resource reusing the
+            // slot starts, whatever topological order the scheduler picks.
+            if (extraEdges != nullptr)
             {
-                cache.release();
-                cache.executing.store(false, std::memory_order_release);
-                outError = RenderGraphError::InvalidInput;
-                return false;
+                for (const auto &[prerequisite, dependent] : *extraEdges)
+                    if (!cache.graph.addDependency(nodes[prerequisite], nodes[dependent]))
+                    {
+                        cache.release();
+                        cache.executing.store(false, std::memory_order_release);
+                        outError = RenderGraphError::InvalidInput;
+                        return false;
+                    }
             }
-        cache.plan = planOwner;
+            cache.plan = planOwner;
+        }
+        catch (...)
+        {
+            // A rebuild that cannot finish (node, closure or adjacency
+            // allocation failure) leaves the cache empty but usable: the flag
+            // must clear so later calls can retry instead of silently taking
+            // the per-call path forever.
+            cache.release();
+            cache.executing.store(false, std::memory_order_release);
+            outError = RenderGraphError::ExecutionFailed;
+            return false;
+        }
     }
     cache.bindings->callback = callback;
     cache.bindings->userData = userData;
@@ -108,7 +143,8 @@ bool ExecutionCache::runCached(CachedExecution &cache, const std::shared_ptr<con
 }
 
 bool ExecutionCache::runPerCall(const RenderGraphPlan &plan, std::uint32_t passCount,
-    RenderGraphExecuteCallback callback, void *userData, TaskScheduler &scheduler, RenderGraphError &outError) const
+    RenderGraphExecuteCallback callback, void *userData, TaskScheduler &scheduler, RenderGraphError &outError,
+    const std::vector<std::pair<std::uint32_t, std::uint32_t>> *extraEdges) const
 {
     try
     {
@@ -122,6 +158,15 @@ bool ExecutionCache::runPerCall(const RenderGraphPlan &plan, std::uint32_t passC
                 outError = RenderGraphError::InvalidInput;
                 return false;
             }
+        if (extraEdges != nullptr)
+        {
+            for (const auto &[prerequisite, dependent] : *extraEdges)
+                if (!graph.addDependency(nodes[prerequisite], nodes[dependent]))
+                {
+                    outError = RenderGraphError::InvalidInput;
+                    return false;
+                }
+        }
         graph.execute(scheduler);
     }
     catch (...)

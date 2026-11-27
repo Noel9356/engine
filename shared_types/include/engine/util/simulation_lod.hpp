@@ -285,7 +285,15 @@ inline std::uint32_t simulationLodResolvePass(SimulationFidelity &band, Simulati
     const std::uint32_t interval = intervals[simulationFidelityIndex(band)];
     if (interval == 0u)
     {
+        // Frozen band: the step counter still advances so the cadence contract
+        // ("call once per fixed step for every simulated object, due or not,
+        // so the stagger phases stay aligned") holds. Freezing the counter
+        // made the object's (counter + phase) stagger depend on how long it
+        // stayed frozen - colliding phases with objects that kept counting -
+        // and delayed the first due pass by up to interval-1 steps after a
+        // promotion, because the first resolve read a stale counter.
         cadence.interval = 1u;
+        ++cadence.stepCounter;
         if (skippedSteps != nullptr)
         {
             ++*skippedSteps;

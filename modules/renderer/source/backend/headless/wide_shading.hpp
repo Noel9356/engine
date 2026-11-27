@@ -38,6 +38,10 @@
 #include "quad_shading.hpp"
 #include "sun_shadows.hpp"
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+
 #ifndef ENGINE_RASTERIZER_INLINE
 #if defined(__GNUC__) || defined(__clang__)
 #define ENGINE_RASTERIZER_INLINE inline __attribute__((always_inline))
@@ -188,9 +192,17 @@ ENGINE_RASTERIZER_INLINE __m512 sunShadowVisibilityWide(const sunshadows::SunSha
             _mm512_mullo_epi32(rowI, _mm512_set1_epi32(static_cast<std::int32_t>(map.resolution))), columnI);
         // Gather with the lane index clamped into the array (out-of-bounds
         // lanes read texel 0 and are masked out below; the value is never
-        // observed).
+        // observed). The upper bound is folded in 64-bit first: a resolution
+        // whose square exceeds INT32_MAX would make the int32 cast wrap
+        // negative and clamp every lane to a negative index (unreachable
+        // while the [renderer] settings cap the map at 8192 texels, but the
+        // clamp must stay safe for any map the fit accepts).
+        const std::uint64_t texelCount = static_cast<std::uint64_t>(map.resolution) * map.resolution;
+        const std::int32_t  maximumTexelIndex = static_cast<std::int32_t>(
+            std::min<std::uint64_t>(texelCount, static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()) + 1u)
+            - 1u);
         const __m512i safeIndex = _mm512_min_epi32(_mm512_max_epi32(index, _mm512_set1_epi32(0)),
-            _mm512_set1_epi32(static_cast<std::int32_t>(map.resolution * map.resolution - 1u)));
+            _mm512_set1_epi32(maximumTexelIndex));
         const __m512 stored = _mm512_i32gather_ps(safeIndex, map.depth.data(), 4);
         // clamp((stored - refDepth) * invRamp + 0.5, 0, 1)
         const __m512 ramp = _mm512_add_ps(_mm512_mul_ps(_mm512_sub_ps(stored, refDepth), invRamp),
@@ -219,23 +231,27 @@ ENGINE_RASTERIZER_INLINE __m512 sunShadowVisibilityWide(const sunshadows::SunSha
 
 // Per-sample inputs for one wide run of sixteen, in the SoA forms the
 // kernel loads directly (the 4-wide RunInputs' fields, widened). Only
-// active lanes carry meaningful values.
+// active lanes carry meaningful values. Every float member is filled or
+// read by a 64-byte-aligned 16-lane store/load, so each carries the same
+// alignment the stack arrays beside the struct already declare (the scalar
+// flag fields need none, and member-level alignment keeps every address
+// valid whatever order the fields sit in).
 struct WideRunInputs
 {
-    float correctedA[16] = {};
-    float correctedB[16] = {};
-    float correctedC[16] = {};
-    float albedo[3][16] = {};
-    float metallic[16] = {};
-    float roughness[16] = {};
-    float occlusion[16] = {};
-    float giIrradiance[3][16] = {};
-    float giCoverage[16] = {};
-    float giOcclusion[16] = {};
+    alignas(64) float correctedA[16] = {};
+    alignas(64) float correctedB[16] = {};
+    alignas(64) float correctedC[16] = {};
+    alignas(64) float albedo[3][16] = {};
+    alignas(64) float metallic[16] = {};
+    alignas(64) float roughness[16] = {};
+    alignas(64) float occlusion[16] = {};
+    alignas(64) float giIrradiance[3][16] = {};
+    alignas(64) float giCoverage[16] = {};
+    alignas(64) float giOcclusion[16] = {};
     bool giValid[16] = {};
-    float shadeNormal[3][16] = {};
-    float sunVisibility[16] = {};
-    float skyVisibility[16] = {};
+    alignas(64) float shadeNormal[3][16] = {};
+    alignas(64) float sunVisibility[16] = {};
+    alignas(64) float skyVisibility[16] = {};
     std::uint16_t active = 0;
 };
 
@@ -355,6 +371,15 @@ ENGINE_RASTERIZER_INLINE void shadeRun16(const shadingrun::RunContext &context, 
         z = _mm512_mul_ps(z, inv);
     };
 
+    // view = normalize(cameraPosition - worldPosition); the double-sided
+    // flip's viewForFlip is the same expression, so the run computes it
+    // before the normal block and reuses it there and in pbrShade (the
+    // 4-wide kernel's structure, widened).
+    __m512 viewX = _mm512_sub_ps(_mm512_set1_ps(context.cameraPosition.x), posX);
+    __m512 viewY = _mm512_sub_ps(_mm512_set1_ps(context.cameraPosition.y), posY);
+    __m512 viewZ = _mm512_sub_ps(_mm512_set1_ps(context.cameraPosition.z), posZ);
+    normalize3(viewX, viewY, viewZ);
+
     __m512 nrmX, nrmY, nrmZ;
     if (context.normalMapped)
     {
@@ -368,15 +393,21 @@ ENGINE_RASTERIZER_INLINE void shadeRun16(const shadingrun::RunContext &context, 
         interpolate(normal[0].x, normal[0].y, normal[0].z, normal[1].x, normal[1].y, normal[1].z, normal[2].x,
             normal[2].y, normal[2].z, rawX, rawY, rawZ);
         normalize3(rawX, rawY, rawZ);
+        // Double-sided draws flip the interpolated normal toward the viewer
+        // on back-facing lanes, exactly where the per-sample path and the
+        // 4-wide kernel flip (mesh.frag's glTF doubleSided rule).
+        if (context.doubleSided)
+        {
+            const __m512 facing = dot3(rawX, rawY, rawZ, viewX, viewY, viewZ);
+            const __mmask16 flip = _mm512_cmp_ps_mask(facing, _mm512_setzero_ps(), _CMP_LT_OQ);
+            rawX = _mm512_mask_mov_ps(rawX, flip, _mm512_sub_ps(_mm512_setzero_ps(), rawX));
+            rawY = _mm512_mask_mov_ps(rawY, flip, _mm512_sub_ps(_mm512_setzero_ps(), rawY));
+            rawZ = _mm512_mask_mov_ps(rawZ, flip, _mm512_sub_ps(_mm512_setzero_ps(), rawZ));
+        }
         nrmX = rawX;
         nrmY = rawY;
         nrmZ = rawZ;
     }
-
-    __m512 viewX = _mm512_sub_ps(_mm512_set1_ps(context.cameraPosition.x), posX);
-    __m512 viewY = _mm512_sub_ps(_mm512_set1_ps(context.cameraPosition.y), posY);
-    __m512 viewZ = _mm512_sub_ps(_mm512_set1_ps(context.cameraPosition.z), posZ);
-    normalize3(viewX, viewY, viewZ);
 
     // ---- ambient block -----------------------------------------------------
     __m512 metallic = _mm512_loadu_ps(inputs.metallic);
@@ -384,14 +415,16 @@ ENGINE_RASTERIZER_INLINE void shadeRun16(const shadingrun::RunContext &context, 
     const __m512 occlusion = _mm512_loadu_ps(inputs.occlusion);
     const __m512 zero = _mm512_setzero_ps();
     const __m512 one = _mm512_set1_ps(1.0f);
-    const __m512 opacity = _mm512_min_ps(_mm512_max_ps(_mm512_set1_ps(context.opacity), zero), one);
     metallic = _mm512_min_ps(_mm512_max_ps(metallic, zero), one);
     roughness = _mm512_min_ps(_mm512_max_ps(roughness, _mm512_set1_ps(minimumRoughness)), one);
 
+    // diffuseAlbedo = albedo * (1 - metallic); no opacity factor - mesh.frag's
+    // twin carries none, and the commit paths apply the blend exactly once
+    // (see pbrShade's header note and shadeRun4's ambient block).
     const __m512 oneMinusMetallic = _mm512_sub_ps(one, metallic);
-    __m512 diffuseX = _mm512_mul_ps(_mm512_mul_ps(albX, oneMinusMetallic), opacity);
-    __m512 diffuseY = _mm512_mul_ps(_mm512_mul_ps(albY, oneMinusMetallic), opacity);
-    __m512 diffuseZ = _mm512_mul_ps(_mm512_mul_ps(albZ, oneMinusMetallic), opacity);
+    __m512 diffuseX = _mm512_mul_ps(albX, oneMinusMetallic);
+    __m512 diffuseY = _mm512_mul_ps(albY, oneMinusMetallic);
+    __m512 diffuseZ = _mm512_mul_ps(albZ, oneMinusMetallic);
 
     const __m512 skyWeight = _mm512_add_ps(_mm512_mul_ps(nrmY, _mm512_set1_ps(0.5f)), _mm512_set1_ps(0.5f));
     const __m512 invSkyWeight = _mm512_sub_ps(one, skyWeight);
@@ -461,9 +494,11 @@ ENGINE_RASTERIZER_INLINE void shadeRun16(const shadingrun::RunContext &context, 
     const __m512 f0Z = _mm512_add_ps(_mm512_mul_ps(_mm512_set1_ps(dielectricF0.z), oneMinusMetallic),
         _mm512_mul_ps(albZ, metallic));
     const __m512 invPi = _mm512_set1_ps(1.0f / glm::pi<float>());
-    const __m512 diffuseTermX = _mm512_mul_ps(_mm512_mul_ps(albX, _mm512_mul_ps(oneMinusMetallic, invPi)), opacity);
-    const __m512 diffuseTermY = _mm512_mul_ps(_mm512_mul_ps(albY, _mm512_mul_ps(oneMinusMetallic, invPi)), opacity);
-    const __m512 diffuseTermZ = _mm512_mul_ps(_mm512_mul_ps(albZ, _mm512_mul_ps(oneMinusMetallic, invPi)), opacity);
+    // diffuse = albedo * ((1 - metallic) * invPi); no opacity factor (see the
+    // ambient block's note).
+    const __m512 diffuseTermX = _mm512_mul_ps(albX, _mm512_mul_ps(oneMinusMetallic, invPi));
+    const __m512 diffuseTermY = _mm512_mul_ps(albY, _mm512_mul_ps(oneMinusMetallic, invPi));
+    const __m512 diffuseTermZ = _mm512_mul_ps(albZ, _mm512_mul_ps(oneMinusMetallic, invPi));
 
     const __m512 sunNDotL = _mm512_max_ps(
         dot3(nrmX, nrmY, nrmZ, _mm512_set1_ps(context.lightDirection.x), _mm512_set1_ps(context.lightDirection.y),
@@ -548,7 +583,12 @@ ENGINE_RASTERIZER_INLINE __m512 mottleModulationWide(__m512 posX, __m512 posY, _
     float footprintMeters, float strength)
 {
     const __m512 one = _mm512_set1_ps(1.0f);
-    if (baseScaleMeters <= 0.0f || strength <= 0.0f)
+    // The shared mottle entry gate (mottle_noise.hpp mottleInputsUsable):
+    // bit-level finiteness tests first, so NaN/Inf scale, footprint or
+    // strength disable the pass identically here and in the scalar twin,
+    // under every math-flag combination (a bare comparison gate folds to a
+    // NaN-passing form under -ffinite-math-only).
+    if (!mottleInputsUsable(baseScaleMeters, footprintMeters, strength))
     {
         return one;
     }
@@ -568,6 +608,18 @@ ENGINE_RASTERIZER_INLINE __m512 mottleModulationWide(__m512 posX, __m512 posY, _
         const __m512 fx = _mm512_floor_ps(px);
         const __m512 fy = _mm512_floor_ps(py);
         const __m512 fz = _mm512_floor_ps(pz);
+        // The scalar twin's int32 domain belt (mottle_noise.hpp valueNoise3d):
+        // a lane whose floored lattice coordinate is non-finite or outside the
+        // int32 domain takes the neutral 0.5 instead of hashing
+        // _mm512_cvtps_epi32's INT_MIN indefinite, so both paths return the
+        // same bytes for the same garbage. Largest float <= INT32_MAX is
+        // 2^31 - 128 (INT32_MAX itself rounds up to 2^31).
+        const __m512 latticeLimit = _mm512_set1_ps(2147483520.0f);
+        const __m512 negatedLatticeLimit = _mm512_xor_ps(latticeLimit, _mm512_set1_ps(-0.0f));
+        const __mmask16 latticeInRange
+            = _mm512_cmp_ps_mask(fx, latticeLimit, _CMP_LE_OQ) & _mm512_cmp_ps_mask(fx, negatedLatticeLimit, _CMP_GE_OQ)
+            & _mm512_cmp_ps_mask(fy, latticeLimit, _CMP_LE_OQ) & _mm512_cmp_ps_mask(fy, negatedLatticeLimit, _CMP_GE_OQ)
+            & _mm512_cmp_ps_mask(fz, latticeLimit, _CMP_LE_OQ) & _mm512_cmp_ps_mask(fz, negatedLatticeLimit, _CMP_GE_OQ);
         const __m512i ix = _mm512_cvtps_epi32(fx);
         const __m512i iy = _mm512_cvtps_epi32(fy);
         const __m512i iz = _mm512_cvtps_epi32(fz);
@@ -615,7 +667,8 @@ ENGINE_RASTERIZER_INLINE __m512 mottleModulationWide(__m512 posX, __m512 posY, _
         const __m512 x11 = _mm512_add_ps(c011, _mm512_mul_ps(_mm512_sub_ps(c111, c011), fadeX));
         const __m512 y0 = _mm512_add_ps(x00, _mm512_mul_ps(_mm512_sub_ps(x10, x00), fadeY));
         const __m512 y1 = _mm512_add_ps(x01, _mm512_mul_ps(_mm512_sub_ps(x11, x01), fadeY));
-        return _mm512_add_ps(y0, _mm512_mul_ps(_mm512_sub_ps(y1, y0), fadeZ));
+        const __m512 noise = _mm512_add_ps(y0, _mm512_mul_ps(_mm512_sub_ps(y1, y0), fadeZ));
+        return _mm512_mask_blend_ps(latticeInRange, _mm512_set1_ps(0.5f), noise);
     };
 
     const __m512 noiseLow = octaveNoise(posX, posY, posZ, 1.0f / scaleLow);

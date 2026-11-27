@@ -284,11 +284,13 @@ struct JointDescription
     double coneHalfAngleRadians  = 3.141592653589793;
     double twistHalfAngleRadians = 3.141592653589793;
 
-    // Hinge motor: drives the relative angular velocity about the hinge axis
-    // toward motorTargetVelocity, never exceeding maximumMotorTorque. The
-    // prismatic motor reuses the same fields as a linear drive: it tracks
-    // motorTargetVelocity along axisLocalA (meters per second) within the
-    // same torque budget interpreted as a maximum force.
+    // Joint motor: drives the relative angular velocity about the hinge axis
+    // toward motorTargetVelocity, never exceeding maximumMotorTorque (a
+    // ball-socket joint drives its twist component about the same axis its
+    // twist limit measures). The prismatic motor reuses the same fields as a
+    // linear drive: it tracks motorTargetVelocity along axisLocalA (meters
+    // per second) within the same torque budget interpreted as a maximum
+    // force.
     bool   motorEnabled        = false;
     double motorTargetVelocity = 0.0;
     double maximumMotorTorque  = 0.0;
@@ -494,8 +496,9 @@ struct PhysicsRigidCapability
     void (*destroyJoint)(void *self, WorldHandle world, JointHandle joint);
     bool (*copyJointDescription)(void *self, WorldHandle world, JointHandle joint, JointDescription *outDescription);
 
-    // Enables or re-tunes a hinge motor; accepted for any joint kind (only
-    // hinges act on it).
+    // Enables or re-tunes a joint motor; accepted for any joint kind
+    // (hinges drive their axis, ball sockets drive their twist component,
+    // prismatic joints drive their slide axis, other kinds ignore it).
     bool (*setJointMotor)(
         void *self, WorldHandle world, JointHandle joint, bool enabled, double targetVelocity, double maximumTorque);
 

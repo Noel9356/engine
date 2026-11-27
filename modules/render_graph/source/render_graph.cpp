@@ -73,6 +73,48 @@ detail::AliasingStrategy strategyFromString(const std::string &value)
     return detail::AliasingStrategy::BestFit;
 }
 
+// Slot handoffs need ordering constraints the hazard analysis cannot see:
+// transient aliasing assigns two resources to one physical allocation when
+// the plan's schedule separates their live ranges, and execution must honour
+// that separation whatever topological order the scheduler picks. For every
+// slot reuse (previous owner -> new owner, in the plan's resource order) the
+// handoff edge joins the previous owner's last scheduled pass to the new
+// owner's first one; both endpoints are schedule positions of the same plan,
+// strictly forward, so the combined graph stays a DAG. The allocator runs
+// with an unbounded budget here: the call derives edges only and must never
+// fail a graph the compile path accepted (budget enforcement stays there).
+bool deriveAliasingEdges(const RenderGraphPlan &plan, const RenderGraphResourceDescription *resources,
+    std::uint32_t resourceCount, bool aliasingEnabled, detail::AliasingStrategy strategy,
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> &outEdges)
+{
+    outEdges.clear();
+    if (resourceCount == 0 || !aliasingEnabled)
+        return true;
+    std::vector<std::uint32_t> slots(resourceCount, invalidResourceSlot);
+    detail::AliasingConfig     config;
+    config.aliasingEnabled            = true;
+    config.strategy                   = strategy;
+    config.transientMemoryBudgetBytes = ~std::uint64_t{0};
+    detail::AliasingResult aliasing{};
+    RenderGraphError       aliasingError = RenderGraphError::None;
+    if (!detail::allocateTransientSlots(plan, resources, resourceCount, slots.data(), config, aliasing, aliasingError))
+        return false;
+
+    std::vector<std::uint32_t> slotOwner;
+    slotOwner.resize(aliasing.slotCount, invalidResourceSlot);
+    for (const std::uint32_t resource : plan.resourceOrder)
+    {
+        const std::uint32_t slot = slots[resource];
+        if (slot >= slotOwner.size())
+            continue; // unreachable with the allocator's dense slot ids
+        const std::uint32_t previous = slotOwner[slot];
+        if (previous != invalidResourceSlot)
+            outEdges.emplace_back(plan.order[plan.lastUse[previous]], plan.order[plan.firstUse[resource]]);
+        slotOwner[slot] = resource;
+    }
+    return true;
+}
+
 // Module singleton backing RenderGraphCapability. Holds the settings, the
 // plan cache, the execution cache, and borrowed scheduler/profiler pointers;
 // delegates compilation and execution to the detail helpers.
@@ -356,7 +398,9 @@ private:
         return true;
     }
 
-    // Obtains a plan (without lifetimes) and delegates to the execution cache.
+    // Obtains a plan (with transient lifetimes, so execute shares the
+    // compile path's cached analysis) and the slot handoff edges, then
+    // delegates to the execution cache.
     bool executeImpl(const RenderGraphPassDescription *passes, std::uint32_t passCount,
         const RenderGraphResourceDescription *resources, std::uint32_t resourceCount,
         RenderGraphExecuteCallback callback, void *userData, RenderGraphError *outError) const
@@ -379,12 +423,17 @@ private:
         const RenderGraphPlan                 *analysis      = nullptr;
         RenderGraphError                       analysisError = RenderGraphError::None;
         if (!preparePlan(
-                passes, passCount, resources, resourceCount, false, localPlan, cachedPlan, analysis, analysisError))
+                passes, passCount, resources, resourceCount, true, localPlan, cachedPlan, analysis, analysisError))
             return fail(analysisError);
+
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> aliasingEdges;
+        if (!deriveAliasingEdges(*analysis, resources, resourceCount, settings.transientAliasing,
+                snapshotAliasingStrategy(), aliasingEdges))
+            return fail(RenderGraphError::InvalidInput);
 
         RenderGraphError executeError = RenderGraphError::None;
         if (!executionCache_.execute(
-                cachedPlan, *analysis, passCount, callback, userData, *scheduler_, executeError))
+                cachedPlan, *analysis, passCount, callback, userData, *scheduler_, executeError, &aliasingEdges))
             return fail(executeError);
         if (outError != nullptr)
             *outError = RenderGraphError::None;

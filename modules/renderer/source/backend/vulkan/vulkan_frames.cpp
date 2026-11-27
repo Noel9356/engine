@@ -240,6 +240,43 @@ bool VulkanFrameScheduler::waitForFrameSlot()
     return true;
 }
 
+// One bounded wait for a specific slot's previous submission (see the header
+// for why it exists next to waitForFrameSlot). Shares the escalation state
+// and the caps so a wedged driver behaves the same on both paths.
+bool VulkanFrameScheduler::waitForSlotRetirement(std::uint32_t slot)
+{
+    if (device_ == nullptr || slot >= inFlight_.size())
+        return false;
+
+    constexpr std::uint64_t slotRetirementTimeoutNanoseconds = 50'000'000ULL;   // 50 ms
+    constexpr std::uint64_t slotRecoveryTimeoutNanoseconds   = 1'000'000'000ULL; // 1 s
+    constexpr std::uint32_t manyConsecutiveStallLimit        = 20u;
+
+    const std::uint64_t timeoutNanoseconds
+        = consecutiveSlotTimeouts_ >= manyConsecutiveStallLimit ? slotRecoveryTimeoutNanoseconds
+                                                                : slotRetirementTimeoutNanoseconds;
+    bool retired = false;
+    if (device_->timelineSemaphore() != VK_NULL_HANDLE && slot < frameTimelineValues_.size())
+    {
+        const std::uint64_t waitValue = frameTimelineValues_[slot];
+        if (waitValue == 0 || device_->waitTimelineFor(waitValue, timeoutNanoseconds))
+            retired = true;
+    }
+    else
+    {
+        if (vkWaitForFences(device_->device(), 1, &inFlight_[slot], VK_TRUE, timeoutNanoseconds) == VK_SUCCESS)
+            retired = true;
+    }
+    if (!retired)
+    {
+        if (consecutiveSlotTimeouts_ < UINT32_MAX)
+            ++consecutiveSlotTimeouts_;
+        return false;
+    }
+    consecutiveSlotTimeouts_ = 0;
+    return true;
+}
+
 void VulkanFrameScheduler::beginGpuTiming()
 {
     if (!gpuTimingAvailable_ || timestampQueries_ == VK_NULL_HANDLE)
@@ -266,6 +303,33 @@ void VulkanFrameScheduler::resetFrameSlotFence()
 void VulkanFrameScheduler::rotate()
 {
     currentFrame_ = (currentFrame_ + 1) % framesInFlight();
+}
+
+void VulkanFrameScheduler::resetImageAvailableSemaphore()
+{
+    if (device_ == nullptr || currentFrame_ >= imageAvailable_.size())
+        return;
+    const VkDevice vulkanDevice = device_->device();
+    // A null handle only occurs after a failed recreation, and retrying the
+    // recreation is the caller's recovery path; destroying a null handle
+    // would be invalid usage on that retry.
+    if (imageAvailable_[currentFrame_] != VK_NULL_HANDLE)
+    {
+        vkDestroySemaphore(vulkanDevice, imageAvailable_[currentFrame_], nullptr);
+    }
+    const VkSemaphoreCreateInfo semaphoreInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+    };
+    if (vkCreateSemaphore(vulkanDevice, &semaphoreInfo, nullptr, &imageAvailable_[currentFrame_]) != VK_SUCCESS)
+    {
+        std::fprintf(stderr,
+            "renderer module: could not recreate frame slot %u's acquire semaphore; the slot must not acquire "
+            "again this run\n",
+            currentFrame_);
+        imageAvailable_[currentFrame_] = VK_NULL_HANDLE;
+    }
 }
 
 // One fence wait per slot; used at destruction so teardown cannot race the

@@ -12,6 +12,7 @@
 #include <engine/kernel/plugin_api.hpp>
 #include <engine/kernel/plugin_discovery.hpp>
 #include <engine/kernel/plugin_manifest.hpp>
+#include <engine/kernel/sha256.hpp>
 #include <filesystem>
 #include <memory>
 #include <set>
@@ -36,30 +37,43 @@ std::vector<DiscoveredPluginPackage> discoverPluginPackages(
     }
 
     std::vector<std::filesystem::path> packageDirectories;
-    for (const std::filesystem::directory_entry &entry :
-        std::filesystem::directory_iterator(pluginsDirectory,
-            std::filesystem::directory_options::skip_permission_denied, scanError))
+    // Iteration advances through the error_code increment: a filesystem error
+    // mid-scan (a directory deleted or losing permissions while the iterator
+    // holds it) must report and stop the walk instead of throwing out of the
+    // discovery, the same rule the module library walk follows.
+    std::error_code iterationError;
+    for (std::filesystem::directory_iterator iterator(pluginsDirectory,
+             std::filesystem::directory_options::skip_permission_denied, scanError),
+             end;
+         iterator != end;
+         iterator.increment(iterationError))
     {
+        if (iterationError)
+        {
+            report += "- plugin scan of '" + pluginsDirectory.string() + "' stopped at a filesystem error: "
+                    + iterationError.message() + "\n";
+            break;
+        }
         if (scanError)
         {
             scanError.clear();
             continue;
         }
         std::error_code entryError;
-        const bool      entryIsDirectory = entry.is_directory(entryError);
+        const bool      entryIsDirectory = iterator->is_directory(entryError);
         if (entryError || !entryIsDirectory)
         {
             continue;
         }
-        if (!std::filesystem::exists(entry.path() / PluginManifestLoader::manifestFileName, entryError) || entryError)
+        if (!std::filesystem::exists(iterator->path() / PluginManifestLoader::manifestFileName, entryError) || entryError)
         {
-            report += "- directory '" + entry.path().string() + "' inside the plugins directory has no "
+            report += "- directory '" + iterator->path().string() + "' inside the plugins directory has no "
                     + std::string(PluginManifestLoader::manifestFileName)
                     + "; every subdirectory of a plugins directory is a plugin package, so this one is skipped."
                       " Add the manifest or move the directory out of the plugins tree.\n";
             continue;
         }
-        packageDirectories.push_back(entry.path());
+        packageDirectories.push_back(iterator->path());
     }
     std::sort(packageDirectories.begin(), packageDirectories.end());
 
@@ -91,7 +105,8 @@ std::vector<DiscoveredPluginPackage> discoverPluginPackages(
             package.sceneFile = packageDirectory / package.manifest.scene;
         }
         const std::filesystem::path defaultsPath = packageDirectory / ConfigurationStore::pluginDefaultsFileName;
-        if (std::filesystem::exists(defaultsPath))
+        std::error_code           defaultsError;
+        if (std::filesystem::exists(defaultsPath, defaultsError) && !defaultsError)
         {
             package.defaultsFile = defaultsPath;
         }
@@ -115,10 +130,15 @@ std::vector<std::filesystem::path> nativePluginLibraryCandidates(
     return libraryCandidates;
 }
 
-// dlopens the plugin library, verifies its entry table and interface version, then
-// creates the instance; the compiled manifest name must agree with plugin.toml.
-// Failures destroy anything already created.
-bool loadNativePluginEntry(const DiscoveredPluginPackage &package, NativePluginLoad &load, std::string &report)
+// dlopens the plugin library (after re-verifying the sha256 the trust
+// decision was based on - see loadModuleLibrary for the module twin;
+// a file replaced between hashing and loading must fail here instead of
+// executing content the trust decision never saw), verifies its entry table
+// and interface version, then creates the instance; the compiled manifest
+// name must agree with plugin.toml. Failures destroy anything already
+// created.
+bool loadNativePluginEntry(const DiscoveredPluginPackage &package, const std::string &expectedSha256,
+    NativePluginLoad &load, std::string &report)
 {
     const std::filesystem::path packageDirectory = package.manifest.directory;
     const PluginManifest      &pluginManifest  = package.manifest;
@@ -126,7 +146,8 @@ bool loadNativePluginEntry(const DiscoveredPluginPackage &package, NativePluginL
     std::filesystem::path libraryPath;
     for (const std::filesystem::path &candidate : nativePluginLibraryCandidates(packageDirectory, pluginManifest.entry))
     {
-        if (std::filesystem::exists(candidate))
+        std::error_code candidateError;
+        if (std::filesystem::exists(candidate, candidateError) && !candidateError)
         {
             libraryPath = candidate;
             break;
@@ -143,6 +164,25 @@ bool loadNativePluginEntry(const DiscoveredPluginPackage &package, NativePluginL
         report += "- native plugin '" + pluginManifest.id + "' has no library file in '" + packageDirectory.string()
                 + "' (looked for " + expectedNames + "); build the plugin first.\n";
         return false;
+    }
+
+    if (!expectedSha256.empty())
+    {
+        std::string       hashError;
+        const std::string loadedSha256 = Sha256::fileHexDigest(libraryPath, hashError);
+        if (loadedSha256.empty())
+        {
+            report += "- native plugin '" + pluginManifest.id + "': library '" + libraryPath.string()
+                    + "' cannot be re-hashed for loading: " + hashError + "\n";
+            return false;
+        }
+        if (loadedSha256 != expectedSha256)
+        {
+            report += "- native plugin '" + pluginManifest.id + "': library '" + libraryPath.string()
+                    + "' changed on disk after it was hashed for the trust gate (or the hashed candidate differs "
+                      "from the loaded one); refusing to load it.\n";
+            return false;
+        }
     }
 
     load.library = std::make_unique<DynamicLibrary>();

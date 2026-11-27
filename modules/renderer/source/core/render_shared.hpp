@@ -141,7 +141,10 @@ inline const FloatEncodeTable floatEncode;
 
 inline float fastSrgbEncode(float channel)
 {
-    const float clamped = channel < 0.0f ? 0.0f : (channel > 1.0f ? 1.0f : channel);
+    // min/max (not ternaries): the pair collapses NaN to 0 the way toByte
+    // does, so a NaN channel cannot reach the table index (the cast would
+    // be undefined and the index wild).
+    const float clamped = std::min(1.0f, std::max(0.0f, channel));
     return srgb_tables::floatEncode.values[static_cast<std::uint32_t>(clamped * 255.0f + 0.5f)];
 }
 
@@ -185,7 +188,9 @@ ENGINE_SHADING_INLINE std::uint32_t encodeColorRgba(const glm::vec3 &color)
     const std::uint8_t *values = srgb_tables::byteEncode.values;
     const auto channelByte = [values](float channel)
     {
-        const float clamped = channel < 0.0f ? 0.0f : (channel > 1.0f ? 1.0f : channel);
+        // min/max pairs (not ternaries) so a NaN channel collapses to 0
+        // instead of surviving the clamp into an undefined table index.
+        const float clamped = std::min(1.0f, std::max(0.0f, channel));
         return values[static_cast<std::uint32_t>(clamped * 255.0f + 0.5f)];
     };
     const std::uint32_t red   = channelByte(color.r);

@@ -32,9 +32,13 @@ layout(constant_id = 6) const int SRGB_OUTPUT = 0;
 // NO radiance_cache probe-grid fetch (the probe walk costs 8 probes x 27 floats
 // per pixel and multiplies by the layer count; fur keeps the hemispheric
 // ambient term instead - documented in modules/fur/docs/overview.md).
-// layout(early_fragment_tests) is safe: no discard, no gl_FragDepth write;
-// fragments hidden behind the character's opaque base surface skip the
-// shading entirely.
+// layout(early_fragment_tests) is safe ONLY because the fur pipeline keeps
+// depth WRITES off (see vulkan_pipeline.cpp): the strand-crop discard below
+// cannot retroactively undo a depth/stencil write the early test already
+// committed. With writes off, an early test only rejects fragments early
+// (fragments hidden behind the character's opaque base surface skip the
+// shading entirely), which a discard still may re-emphasize afterwards.
+// If depth writes are ever enabled for fur, early_fragment_tests must go.
 
 layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec3 vColor;

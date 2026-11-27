@@ -48,11 +48,6 @@ class ScheduledTask final
 public:
     ScheduledTask() = default;
 
-    ScheduledTask(MainThreadTaskQueue *ownerScheduler, std::shared_ptr<bool> taskArmed)
-        : owner(ownerScheduler),
-          armed(std::move(taskArmed))
-    {}
-
     ~ScheduledTask()
     {
         cancel();
@@ -98,6 +93,13 @@ public:
 
 private:
     friend class MainThreadTaskQueue;
+
+    // Both constructors are queue-issued: an unguarded handle (no lifetime
+    // token) could call owner->removeTask after the queue's destruction.
+    ScheduledTask(MainThreadTaskQueue *ownerScheduler, std::shared_ptr<bool> taskArmed)
+        : owner(ownerScheduler),
+          armed(std::move(taskArmed))
+    {}
 
     ScheduledTask(MainThreadTaskQueue *ownerScheduler, std::shared_ptr<bool> taskArmed,
         const std::shared_ptr<void> &ownerLifetime)

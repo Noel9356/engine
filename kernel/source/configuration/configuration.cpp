@@ -583,6 +583,8 @@ bool ConfigurationStore::loadFromFile(const std::filesystem::path &path, std::st
         toml::table parsed = toml::parse_file(path.string());
         if (!tableDepthWithinLimit(parsed))
         {
+            errorMessage = std::string("configuration parse error in '") + path.string()
+                         + "': table nesting exceeds the supported depth";
             return false;
         }
         if (parsedTable == nullptr)
@@ -627,6 +629,8 @@ bool ConfigurationStore::mergeDefaultsFile(const std::filesystem::path &path, Co
         parsed = toml::parse_file(path.string());
         if (!tableDepthWithinLimit(parsed))
         {
+            errorMessage = std::string("configuration parse error in '") + path.string()
+                         + "': table nesting exceeds the supported depth";
             return false;
         }
     }
@@ -691,6 +695,8 @@ bool ConfigurationStore::mergeProfileFile(const std::filesystem::path &path, std
         parsed = toml::parse_file(path.string());
         if (!tableDepthWithinLimit(parsed))
         {
+            errorMessage = std::string("configuration parse error in '") + path.string()
+                         + "': table nesting exceeds the supported depth";
             return false;
         }
     }
@@ -797,6 +803,8 @@ bool ConfigurationStore::applySceneFile(const std::filesystem::path &path, std::
         parsed = toml::parse_file(path.string());
         if (!tableDepthWithinLimit(parsed))
         {
+            errorMessage = std::string("configuration parse error in '") + path.string()
+                         + "': table nesting exceeds the supported depth";
             return false;
         }
     }
@@ -1165,7 +1173,13 @@ bool ConfigurationStore::fileParses(const std::filesystem::path &path, std::stri
     try
     {
         const toml::table parsed = toml::parse_file(path.string());
-        return tableDepthWithinLimit(parsed);
+        if (!tableDepthWithinLimit(parsed))
+        {
+            errorMessage = std::string("configuration parse error in '") + path.string()
+                         + "': table nesting exceeds the supported depth";
+            return false;
+        }
+        return true;
     }
     catch (const toml::parse_error &error)
     {
@@ -1670,7 +1684,20 @@ std::vector<double> ConfigurationStore::floatingArrayAtPath(
     const toml::node   *node = resolvePath(sectionTable(sectionName), path);
     if (const auto *array = node == nullptr ? nullptr : node->as_array())
     {
-        array->for_each([&values](const toml::value<double> &element) { values.push_back(element.get()); });
+        // Integer elements coerce like floatingAtPath's scalar form: a
+        // mixed [1, 2.5] yields {1, 2.5} instead of silently dropping the
+        // integers (TOML distinguishes 1 from 1.0; config authors do not).
+        array->for_each([&values](const toml::node &element)
+        {
+            if (const auto *floating = element.as_floating_point())
+            {
+                values.push_back(floating->get());
+            }
+            else if (const auto *integer = element.as_integer())
+            {
+                values.push_back(static_cast<double>(integer->get()));
+            }
+        });
     }
     return values;
 }

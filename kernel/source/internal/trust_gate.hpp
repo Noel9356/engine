@@ -41,6 +41,17 @@ public:
         return advisories_;
     }
 
+    // Advisory lookup by participant identity; nullptr when none was
+    // recorded (participants only earn an advisory when they carry risk).
+    const ParticipantTrustAdvisory *advisoryFor(const std::string &name, ParticipantKind kind) const;
+
+    // Recomputes a script plugin's bundle digest (plugin.toml plus every
+    // .lua file under the package directory, length-prefixed; the same
+    // recipe appendPluginRiskWarning hashed at discovery time) so a hosting
+    // module can re-verify the content before the scripts execute. Empty
+    // when the bundle cannot be read.
+    std::string scriptPluginBundleDigest(const std::filesystem::path &packageDirectory) const;
+
     void appendPluginRiskWarning(const PluginManifest &pluginManifest, bool isNativePlugin, std::string &warnings);
 
     void appendModuleRiskWarning(const ModuleLibraryRecord &module, std::string &warnings);

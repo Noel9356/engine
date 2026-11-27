@@ -47,6 +47,15 @@ inline std::int64_t hashAdd(std::int64_t a, std::int64_t b) noexcept
     return static_cast<std::int64_t>(static_cast<std::uint64_t>(a) + static_cast<std::uint64_t>(b));
 }
 
+// Subtraction is the same wrapping story (the lattice walk's second-point
+// offsets subtract a multiplied prime from the hashed coordinate): unsigned
+// wrapping is well-defined and bit-identical to the two's-complement result
+// the hash has always consumed.
+inline std::int64_t hashSubtract(std::int64_t a, std::int64_t b) noexcept
+{
+    return static_cast<std::int64_t>(static_cast<std::uint64_t>(a) - static_cast<std::uint64_t>(b));
+}
+
 constexpr double unskew2D   = -0.21132486540518713;
 
 constexpr double root3Over3             = 0.577350269189626;
@@ -196,8 +205,8 @@ float noise3UnrotatedBase(std::int64_t seed, double xr, double yr, double zr)
             {
                 b -= 1.0f;
                 value += (b * b) * (b * b)
-                       * grad3(seed, xrbp - hashMultiply(static_cast<std::int64_t>(xNSign), primeX), yrbp, zrbp,
-                           xri + static_cast<float>(xNSign), yri, zri);
+                       * grad3(seed, hashSubtract(xrbp, hashMultiply(static_cast<std::int64_t>(xNSign), primeX)), yrbp,
+                           zrbp, xri + static_cast<float>(xNSign), yri, zri);
             }
         }
         else if (ay0 > ax0 && ay0 >= az0)
@@ -207,8 +216,8 @@ float noise3UnrotatedBase(std::int64_t seed, double xr, double yr, double zr)
             {
                 b -= 1.0f;
                 value += (b * b) * (b * b)
-                       * grad3(seed, xrbp, yrbp - hashMultiply(static_cast<std::int64_t>(yNSign), primeY), zrbp,
-                           xri, yri + static_cast<float>(yNSign), zri);
+                       * grad3(seed, xrbp, hashSubtract(yrbp, hashMultiply(static_cast<std::int64_t>(yNSign), primeY)),
+                           zrbp, xri, yri + static_cast<float>(yNSign), zri);
             }
         }
         else
@@ -218,8 +227,9 @@ float noise3UnrotatedBase(std::int64_t seed, double xr, double yr, double zr)
             {
                 b -= 1.0f;
                 value += (b * b) * (b * b)
-                       * grad3(seed, xrbp, yrbp, zrbp - hashMultiply(static_cast<std::int64_t>(zNSign), primeZ),
-                           xri, yri, zri + static_cast<float>(zNSign));
+                       * grad3(seed, xrbp, yrbp,
+                           hashSubtract(zrbp, hashMultiply(static_cast<std::int64_t>(zNSign), primeZ)), xri, yri,
+                           zri + static_cast<float>(zNSign));
             }
         }
 

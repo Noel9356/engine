@@ -22,6 +22,7 @@ bool stepFluid(
     const FluidSettings &settings,
     engine::physics_rigid::PhysicsRigidCapability *rigid,
     double fixedDeltaSeconds,
-    std::uint32_t substeps);
+    std::uint32_t substeps,
+    std::uint32_t interval);
 
 } // namespace engine::physics_fluid

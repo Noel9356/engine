@@ -157,6 +157,15 @@ public:
         return extent_;
     }
 
+    // Whether a rebuild now would produce a different extent: the surface's
+    // currentExtent is authoritative (the requested viewport only fills in
+    // when the compositor reports UINT32_MAX), so this compares the resolved
+    // extent, not the request. A configured viewport that merely differs from
+    // the surface extent is a render-viewport request (it bounds the drawing
+    // viewport and scissor), NOT a resize signal - recreating for it every
+    // beginFrame would stall the loop on a device-idle rebuild per frame.
+    bool extentWouldChange(std::uint32_t viewportWidth, std::uint32_t viewportHeight) const;
+
     const std::vector<VkImage> &images() const
     {
         return images_;

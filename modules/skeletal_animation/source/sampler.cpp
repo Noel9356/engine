@@ -59,7 +59,10 @@ std::uint32_t findLeftKey(const AnimationKeyframe *keys, std::uint32_t keyCount,
 
     const auto upper = std::upper_bound(keys, keys + keyCount, sampleTime,
         [](float value, const AnimationKeyframe &key) { return value < key.timeSeconds; });
-    leftIndex = static_cast<std::uint32_t>((upper - keys) - 1);
+    // sampleTime below keys[0] would make upper == keys; the caller clamps
+    // that case away, and the clamp here keeps a future producer of the
+    // contract from walking into keys[-1] (0xFFFFFFFF) one call later.
+    leftIndex = upper == keys ? 0u : static_cast<std::uint32_t>((upper - keys) - 1);
     if (cursor != nullptr)
         *cursor = leftIndex;
     return leftIndex;

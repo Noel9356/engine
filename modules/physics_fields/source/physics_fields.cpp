@@ -47,6 +47,33 @@ double length3(const double v[3])
 // Deterministic 3D value noise: integer lattice hashing with cubic-smooth
 // interpolation between lattice values. The hash mixes three coordinates
 // into one pseudo-random lattice value; no state, fully repeatable.
+
+// Largest lattice coordinate the int64 walk accepts: callers feed wind and
+// turbulence coordinates derived from user positions and base speeds, which
+// can overflow to Inf or leave the int64 range; casting such a double is
+// undefined behaviour. Non-finite coordinates sample the neutral zero
+// lattice point; out-of-range finite coordinates clamp to the boundary
+// (the noise is a hash - the boundary sample is as good as any). The limit
+// keeps room for the +1 corner step inside int64.
+constexpr double kLatticeCoordinateLimit = 4611686018427387904.0; // 2^62
+
+std::int64_t latticeCoordinate(double floored)
+{
+    if (!std::isfinite(floored))
+    {
+        return 0;
+    }
+    if (floored >= kLatticeCoordinateLimit)
+    {
+        return static_cast<std::int64_t>(kLatticeCoordinateLimit) - 1;
+    }
+    if (floored <= -kLatticeCoordinateLimit)
+    {
+        return -static_cast<std::int64_t>(kLatticeCoordinateLimit);
+    }
+    return static_cast<std::int64_t>(floored);
+}
+
 double hashLattice(std::int64_t x, std::int64_t y, std::int64_t z)
 {
     std::uint64_t h = static_cast<std::uint64_t>(x) * 0x9E3779B185EBCA87ull;
@@ -72,9 +99,9 @@ double valueNoise3(double x, double y, double z)
     const double sx = fx * fx * (3.0 - 2.0 * fx);
     const double sy = fy * fy * (3.0 - 2.0 * fy);
     const double sz = fz * fz * (3.0 - 2.0 * fz);
-    const std::int64_t ix = static_cast<std::int64_t>(floorX);
-    const std::int64_t iy = static_cast<std::int64_t>(floorY);
-    const std::int64_t iz = static_cast<std::int64_t>(floorZ);
+    const std::int64_t ix = latticeCoordinate(floorX);
+    const std::int64_t iy = latticeCoordinate(floorY);
+    const std::int64_t iz = latticeCoordinate(floorZ);
     double value = 0.0;
     for (int corner = 0; corner < 8; ++corner)
     {
@@ -337,7 +364,7 @@ private:
         setError(error, FieldsError::None);
         if (rigid_ == nullptr)
         {
-            setError(error, FieldsError::InvalidHandle);
+            setError(error, FieldsError::InvalidDescription);
             return invalidWind;
         }
         if (description == nullptr)
@@ -357,7 +384,12 @@ private:
             || !std::isfinite(description->turbulenceStrength)
             || description->baseSpeed < 0.0 || description->gustStrength < 0.0
             || description->gustStrength > 2.0 || description->gustPeriodSeconds < 0.0
-            || description->turbulenceStrength < 0.0 || description->turbulenceStrength > 2.0)
+            || description->turbulenceStrength < 0.0 || description->turbulenceStrength > 2.0
+            // Wind beyond any physical scale (the strongest hurricanes are
+            // ~1e2 m/s) is rejected so every downstream product - gust and
+            // turbulence multipliers up to 5x, consumers squaring the speed -
+            // stays finite.
+            || description->baseSpeed > 1.0e6)
         {
             setError(error, FieldsError::InvalidDescription);
             return invalidWind;
@@ -512,7 +544,7 @@ private:
         setError(error, FieldsError::None);
         if (rigid_ == nullptr)
         {
-            setError(error, FieldsError::InvalidHandle);
+            setError(error, FieldsError::InvalidDescription);
             return invalidForceVolume;
         }
         if (description == nullptr)
@@ -751,6 +783,13 @@ private:
                 continue;
             }
             const double scale = impulseMagnitude * falloff / directionLength;
+            if (!std::isfinite(scale))
+            {
+                // The magnitude x falloff product overflowed; the rigid
+                // entry point rejects non-finite impulses anyway - skip the
+                // call instead of reporting a blast that never happened.
+                continue;
+            }
             const double impulse[3] = {direction[0] * scale, direction[1] * scale, direction[2] * scale};
             const double centerPoint[3] = {state.transform.position.x, state.transform.position.y,
                 state.transform.position.z};

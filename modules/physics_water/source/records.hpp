@@ -78,9 +78,13 @@ struct OceanRecord
     std::vector<WakeState> wakeStates;
     std::vector<double>    bodyVolumes;
 
-    // Gravity magnitude of this ocean's rigid world, captured at creation
-    // (the buoyancy pass pushes opposite to it).
-    double gravityMagnitude = 9.81;
+    // Gravity of this ocean's rigid world, captured at creation (the buoyancy
+    // pass pushes with -rho * V * g - the full VECTOR, so a tilted gravity
+    // field pushes floats opposite its actual direction and scales with the
+    // true magnitude; gravityMagnitude is |g| precomputed for the passes
+    // that want the scalar).
+    math::Vec3 gravity{0.0, -9.81, 0.0};
+    double     gravityMagnitude = 9.81;
 
     // Simulation LOD: importance-driven fidelity band shared by the two
     // passes, each with its own staggered cadence (the phases derive from

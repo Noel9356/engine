@@ -156,8 +156,17 @@ void EngineKernel::loadModuleLibraries(std::string &report)
                     + "' cannot be scanned: " + scanError.message() + "\n";
             return;
         }
-        for (const std::filesystem::directory_entry &entry : module)
+        // Increments carry their own error_code so a failing directory read
+        // cannot throw out of the scan; the walk stops and keeps what it
+        // gathered (the report path below fails closed on missing modules).
+        for (std::filesystem::directory_iterator entryIterator = module;
+            entryIterator != std::filesystem::directory_iterator(); entryIterator.increment(scanError))
         {
+            if (scanError)
+            {
+                break;
+            }
+            const std::filesystem::directory_entry &entry = *entryIterator;
             std::error_code statError;
             const bool      entryIsDirectory = entry.is_directory(statError);
             if (statError)
@@ -183,9 +192,14 @@ void EngineKernel::loadModuleLibraries(std::string &report)
         {
             continue;
         }
-        for (const std::filesystem::directory_entry &entry : nested)
+        for (std::filesystem::directory_iterator entryIterator = nested;
+            entryIterator != std::filesystem::directory_iterator(); entryIterator.increment(statError))
         {
-            collectLibraries(entry);
+            if (statError)
+            {
+                break;
+            }
+            collectLibraries(*entryIterator);
         }
     }
 
@@ -447,6 +461,27 @@ bool EngineKernel::scanUndescribedModuleLibraryDescriptor(const UndescribedModul
     outRecord.libraryPath   = candidate.libraryPath;
     outRecord.contentSha256 = candidate.contentSha256;
 
+    // The digest was taken at gather time and the consent decision may have
+    // run interactively since, so the bytes may have changed underneath; the
+    // scan executes library code (engineQueryModuleEntryTable runs inside the
+    // dlopened image), so the same re-hash-before-load check loadModuleLibrary
+    // applies must guard this path too: content the trust decision never saw
+    // must fail here instead of running.
+    if (!candidate.contentSha256.empty())
+    {
+        std::string       hashError;
+        const std::string loadedSha256 = Sha256::fileHexDigest(candidate.libraryPath, hashError);
+        if (loadedSha256.empty() || loadedSha256 != candidate.contentSha256)
+        {
+            report += "- module library '" + candidate.libraryPath.string()
+                    + (loadedSha256.empty()
+                            ? std::string("' cannot be re-hashed for scanning: ") + hashError + "\n"
+                            : std::string("' changed on disk after it was hashed for the scan decision; refusing to "
+                                          "scan it.\n"));
+            return false;
+        }
+    }
+
     auto library = std::make_unique<DynamicLibrary>();
     const EngineModuleEntryTable *moduleEntryTable
         = loadAndQueryModuleEntryTable(*library, candidate.libraryPath, report);
@@ -530,6 +565,25 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
         }
         ParticipantRecord record{
             .name = module.descriptor.name, .manifest = ParticipantManifest{.kind = ParticipantKind::EngineModule}};
+        // Every failure below abandons this module's record; the instance
+        // dies with the local record, and the library mapping must die with
+        // it (a rejected-but-active module keeping its .so resident until
+        // the next gather is a leak and keeps untrusted code mapped).
+        // ORDER MATTERS: the owned instance is destroyed FIRST and the
+        // library unmapped SECOND - the instance's virtual destructor lives
+        // in the module's .so, so dlclose while the instance is still alive
+        // would call through an unmapped vtable (crash on every mismatch
+        // path that had successfully created the instance).
+        const auto abandonModule = [&record, &module]()
+        {
+            record.ownedModule.reset();
+            record.moduleInstance = nullptr;
+            if (module.library != nullptr)
+            {
+                module.library.reset();
+                module.createModule = nullptr;
+            }
+        };
 
         try
         {
@@ -538,6 +592,7 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
         catch (const std::exception &error)
         {
             report += "- module factory for '" + module.descriptor.name + "' threw: " + error.what() + "\n";
+            abandonModule();
             successful = false;
             continue;
         }
@@ -545,6 +600,7 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
         if (record.ownedModule == nullptr)
         {
             report += "- module factory for '" + module.descriptor.name + "' returned no instance.\n";
+            abandonModule();
             successful = false;
             continue;
         }
@@ -554,6 +610,7 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
         {
             report += "- module '" + module.descriptor.name + "' reports the manifest name '" + record.manifest.name
                     + "'; the descriptor name and the manifest name must match.\n";
+            abandonModule();
             successful = false;
             continue;
         }
@@ -563,6 +620,7 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
             report += "- module '" + module.descriptor.name + "' descriptor version '" + module.descriptor.version
                     + "' differs from its manifest version '" + record.manifest.version
                     + "'; the descriptor and the manifest must agree.\n";
+            abandonModule();
             successful = false;
             continue;
         }
@@ -571,6 +629,7 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
             report += "- module '" + module.descriptor.name
                     + "' declares different provided capabilities in its manifest than in its module descriptor; "
                       "rebuild the module with this kernel.\n";
+            abandonModule();
             successful = false;
             continue;
         }
@@ -579,6 +638,7 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
             report += "- module '" + module.descriptor.name
                     + "' declares different required capabilities in its manifest than in its module descriptor; "
                       "rebuild the module with this kernel.\n";
+            abandonModule();
             successful = false;
             continue;
         }
@@ -592,6 +652,7 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
                     + "' declares different optional capabilities in its manifest [" + manifestList
                     + "] than in its module descriptor [" + descriptorList + "]; "
                       "rebuild the module with this kernel.\n";
+            abandonModule();
             successful = false;
             continue;
         }
@@ -614,6 +675,7 @@ bool EngineKernel::instantiateActiveModules(std::string &report)
                       "declares; declare the environment permissions (anything outside the capability.* "
                       "namespace) in the descriptor's declaredPermissions so the trust gate sees them before "
                       "the module is instantiated.\n";
+            abandonModule();
             successful = false;
             continue;
         }
@@ -663,7 +725,12 @@ void EngineKernel::loadNativePluginLibraries(std::string &report)
     {
         const PluginManifest &pluginManifest = package.manifest;
         NativePluginLoad      load;
-        if (!loadNativePluginEntry(package, load, report))
+        // The digest the trust gate computed at discovery time; empty when
+        // no advisory was recorded (then no re-verification is possible,
+        // matching the module path's empty-digest behaviour).
+        const ParticipantTrustAdvisory *advisory
+            = trustGate_->advisoryFor(pluginManifest.id, ParticipantKind::NativePlugin);
+        if (!loadNativePluginEntry(package, advisory != nullptr ? advisory->sha256 : std::string{}, load, report))
         {
             auto recordIt = std::find_if(records_.begin(),
                 records_.end(),

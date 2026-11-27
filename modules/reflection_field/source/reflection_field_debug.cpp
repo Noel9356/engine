@@ -196,10 +196,12 @@ bool rfComposeDebugView(RfPipelineState &state, TaskScheduler *scheduler, Reflec
                                 RfChainResolve chain = resolveRayChain(
                                     state, clipOrigin, chainOrigin, chainDirection, chainWeight,
                                     state.settings.maxTransmissionSegments, !transmits, seed);
-                                // The reference brute-forces scene traces only
-                                // (no screen tier), so a deferred chain answer is
-                                // shaded right here (the texel's own response as
-                                // seen from the camera, specular included).
+                                // The reference runs the per-frame estimator
+                                // (opaque texels may resolve through the screen
+                                // tier exactly as the field pass does), so a
+                                // deferred chain answer is shaded right here
+                                // (the texel's own response as seen from the
+                                // camera, specular included).
                                 for (std::uint32_t entry = 0; entry < chain.deferredCount; ++entry)
                                 {
                                     const std::uint32_t hitTexel = chain.deferred[entry].hitTexel;

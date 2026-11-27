@@ -36,6 +36,12 @@ namespace
 
 namespace math = engine::physics_rigid::math;
 
+// Settled slots release after this many consecutive collision-pass misses.
+// The push-out above lands exactly at the contact distance, so a static
+// surface classifies as a miss by rounding noise alone; a genuine
+// moved-away surface misses every step.
+inline constexpr std::uint32_t kSettleReleaseMisses = 2u;
+
 // Deterministic hash noise in [0, 1) from an integer seed.
 double hashFraction(std::uint64_t seed)
 {
@@ -213,6 +219,7 @@ private:
         slot.age       = 0.0;
         slot.seed      = seed;
         slot.settled   = false;
+        slot.settleMisses = 0u;
         slot.settledTime = 0.0;
         slot.alive     = true;
         emitter.spawnedTotal += 1;
@@ -225,10 +232,29 @@ private:
         // Spawn from the emit rate, filling the pool while both budgets
         // allow: the per-emitter pool cap and the module-wide pool budget
         // across all emitters. Once both are full the loop recycles slots
-        // FIFO. Under simulation LOD one due step covers interval x the
-        // caller's fixed delta, so the debt accrues against wall time and
-        // the emission rate stays exact.
+        // FIFO.
+        // Emission debt accrues against wall time, but the pool can only
+        // accept a bounded number of spawns per step (fresh slots up to the
+        // pool budget, then at most one FIFO recycle per existing slot -
+        // recycling a slot twice in one step just overwrites the earlier
+        // spawn). Debt beyond what this step can possibly spend is dropped
+        // up front exactly like the fmod tail below drops it, so an extreme
+        // rate (or an LOD interval merge multiplying the delta) cannot turn
+        // the recycle loop into an unbounded spin.
         emitter.spawnDebt += description.emitRate * stepDeltaSeconds;
+        {
+            const std::uint32_t moduleRemaining = settings_.maximumParticles > totalSlots_
+                ? static_cast<std::uint32_t>(settings_.maximumParticles - totalSlots_)
+                : 0u;
+            const std::uint32_t poolBudget
+                = std::min(description.maximumParticles, std::min(settings_.maximumParticlesPerEmitter, moduleRemaining));
+            const double spendableDebt = static_cast<double>(poolBudget)
+                + static_cast<double>(static_cast<std::uint32_t>(emitter.slots.size())) + 1.0;
+            if (!std::isfinite(emitter.spawnDebt) || emitter.spawnDebt > spendableDebt)
+            {
+                emitter.spawnDebt = spendableDebt;
+            }
+        }
         while (emitter.spawnDebt >= 1.0 && static_cast<std::uint32_t>(emitter.slots.size())
                                               < std::min(description.maximumParticles, settings_.maximumParticlesPerEmitter)
                                               && totalSlots_ < settings_.maximumParticles)
@@ -239,11 +265,19 @@ private:
             totalSlots_ += 1;
             emitter.spawnDebt -= 1.0;
         }
-        while (emitter.spawnDebt >= 1.0 && emitter.spawnCursor < emitter.slots.size())
+        // At most one full FIFO generation per step (see the debt note
+        // above); the fmod below drops anything the pool could not spend.
         {
-            spawnSlot(emitter, emitter.slots[emitter.spawnCursor], emitter.spawnCursor);
-            emitter.spawnCursor = (emitter.spawnCursor + 1) % static_cast<std::uint32_t>(emitter.slots.size());
-            emitter.spawnDebt -= 1.0;
+            const std::size_t recycleBudget = emitter.slots.size();
+            std::size_t recycled = 0;
+            while (emitter.spawnDebt >= 1.0 && emitter.spawnCursor < emitter.slots.size()
+                && recycled < recycleBudget)
+            {
+                spawnSlot(emitter, emitter.slots[emitter.spawnCursor], emitter.spawnCursor);
+                emitter.spawnCursor = (emitter.spawnCursor + 1) % static_cast<std::uint32_t>(emitter.slots.size());
+                emitter.spawnDebt -= 1.0;
+                ++recycled;
+            }
         }
         if (emitter.spawnDebt >= 1.0)
         {
@@ -367,13 +401,22 @@ private:
                 slot.velocity[axis] = slot.velocity[axis] * dragFactor + acceleration[axis] * stepDeltaSeconds;
             }
             // Stability clamp: a mis-tuned steer gain or wind burst cannot
-            // integrate unbounded speeds; the clamp preserves direction.
+            // integrate unbounded speeds; the clamp preserves direction. A
+            // non-finite velocity (an input magnitude the integrator
+            // overflowed) is zeroed instead - rescaling it would multiply
+            // Inf by 0 and produce NaN.
             {
                 const double speedSquared = slot.velocity[0] * slot.velocity[0]
                     + slot.velocity[1] * slot.velocity[1]
                     + slot.velocity[2] * slot.velocity[2];
                 const double maximum = settings_.maximumVelocity;
-                if (speedSquared > maximum * maximum)
+                if (!std::isfinite(speedSquared))
+                {
+                    slot.velocity[0] = 0.0;
+                    slot.velocity[1] = 0.0;
+                    slot.velocity[2] = 0.0;
+                }
+                else if (speedSquared > maximum * maximum)
                 {
                     const double scale = maximum / std::sqrt(speedSquared);
                     slot.velocity[0] *= scale;
@@ -448,17 +491,44 @@ private:
             if (!sphereQueries_.empty())
             {
                 sphereResults_.resize(sphereQueries_.size());
-                rigid_->collideSpheres(rigid_->self, emitter.world, sphereQueries_.data(),
-                    static_cast<std::uint32_t>(sphereQueries_.size()), sphereResults_.data());
+                const std::uint32_t resolved = rigid_->collideSpheres(rigid_->self, emitter.world,
+                    sphereQueries_.data(), static_cast<std::uint32_t>(sphereQueries_.size()), sphereResults_.data());
+                // A short count means the rigid world is gone (the provider
+                // writes nothing in that case). resize() keeps the previous
+                // step's contents, so every entry must be neutralized before
+                // the walk - otherwise stale hits settle the wrong slots.
+                if (resolved < sphereQueries_.size())
+                {
+                    for (engine::physics_rigid::SphereOverlapResult &result : sphereResults_)
+                    {
+                        result = engine::physics_rigid::SphereOverlapResult{};
+                    }
+                }
                 for (std::size_t entry = 0; entry < sphereSlotIndices_.size(); ++entry)
                 {
                     SlotState &slot = emitter.slots[sphereSlotIndices_[entry]];
                     const engine::physics_rigid::SphereOverlapResult &result = sphereResults_[entry];
                     if (!result.hit || result.depth <= 0.0)
                     {
-                        slot.settled = false;
+                        // A settled slot releases only on a persistent miss:
+                        // the push-out lands exactly at the contact distance,
+                        // so a static surface can classify as a miss by
+                        // rounding noise alone, and re-entering free fall for
+                        // that one step would break the documented settle
+                        // semantics (the slide rate, the leaf hold window,
+                        // and the resting position all assume the settle
+                        // holds while the surface stays).
+                        if (slot.settled)
+                        {
+                            if (++slot.settleMisses >= kSettleReleaseMisses)
+                            {
+                                slot.settled      = false;
+                                slot.settleMisses = 0u;
+                            }
+                        }
                         continue;
                     }
+                    slot.settleMisses = 0u;
                     slot.position[0] += result.normal[0] * result.depth;
                     slot.position[1] += result.normal[1] * result.depth;
                     slot.position[2] += result.normal[2] * result.depth;
@@ -611,7 +681,16 @@ private:
         {
             return false;
         }
-        for (std::uint32_t burst = 0; burst < count; ++burst)
+        // A burst larger than the emitter's hard pool cap can only recycle
+        // or drop particles (the pool never grows past the cap), so every
+        // particle beyond it is pure scan overhead - an unbounded count
+        // turned the call into an O(count x pool) stall on the calling
+        // thread. Clamp to the cap: the excess drops exactly like a full
+        // pool drops spawn attempts.
+        const std::uint32_t poolCap
+            = std::min(emitter->description.maximumParticles, settings_.maximumParticlesPerEmitter);
+        const std::uint32_t boundedCount = std::min(count, poolCap);
+        for (std::uint32_t burst = 0; burst < boundedCount; ++burst)
         {
             // Prefer an expired slot; fall back to the FIFO cursor.
             std::size_t slotIndex = emitter->slots.size();

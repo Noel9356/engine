@@ -597,7 +597,6 @@ private:
             setError(error, ScriptError::InvalidArgument);
             return invalidScriptRuntime;
         }
-        std::lock_guard                initializerLock(initializersMutex_);
         std::shared_ptr<RuntimeRecord> runtime;
         try
         {
@@ -641,7 +640,23 @@ private:
             }
         }
 
-        for (const RuntimeInitializerRecord &initializer : initializers_)
+        // The initializer list is copied out under the mutex and invoked
+        // without it: an initializer may register further initializers or
+        // create runtimes of its own, and both lock this mutex again on the
+        // same thread. The copy is bounded by the configured initializer
+        // budget; an allocation failure here reports the memory limit.
+        std::vector<RuntimeInitializerRecord> initializerSnapshot;
+        try
+        {
+            std::lock_guard initializerLock(initializersMutex_);
+            initializerSnapshot = initializers_;
+        }
+        catch (...)
+        {
+            setError(error, ScriptError::MemoryLimitExceeded);
+            return invalidScriptRuntime;
+        }
+        for (const RuntimeInitializerRecord &initializer : initializerSnapshot)
         {
             bool initialized = false;
             try

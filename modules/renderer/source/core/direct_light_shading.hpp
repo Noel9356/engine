@@ -75,5 +75,27 @@ inline bool resolveDirectLight(const PreparedDirectLight &light, const glm::vec3
     return outAttenuation > 0.0f;
 }
 
+// Degenerate-input-proof normalize for the shading kernels' direction
+// vectors (view vectors and half vectors): glm::normalize divides by
+// glm::length, so a zero vector produces NaN components, and the
+// std::max-based guards downstream keep NaN through (std::max(NaN, x) is
+// NaN - the comparison fails and the NaN argument wins). A camera sitting
+// exactly on a surface point, or a view exactly opposed to a light
+// direction, hits these; the fallback returns a finite canonical direction
+// so one degenerate pixel shades to garbage instead of poisoning the
+// framebuffer. The > 0 test also rejects NaN components (every NaN
+// comparison is false). The GPU twins (mesh.frag / fur.frag) run the plain
+// normalize on inputs that cannot degenerate there, so the shader side stays
+// as-is.
+inline glm::vec3 safeNormalize(const glm::vec3 &vector) noexcept
+{
+    const float lengthSquared = glm::dot(vector, vector);
+    if (!(lengthSquared > 0.0f))
+    {
+        return glm::vec3(0.0f, 0.0f, 1.0f);
+    }
+    return vector * (1.0f / std::sqrt(lengthSquared));
+}
+
 } // namespace renderer
 } // namespace engine

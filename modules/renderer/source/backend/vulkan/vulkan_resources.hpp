@@ -205,7 +205,7 @@ private:
     // Probe storage for the radiance_cache indirect-lighting hook: one host-visible
     // std430 buffer per frame in flight, always bound on set 0 binding 1
     // (a zeroed dummy when no grid is active keeps the pipeline valid).
-    static constexpr VkDeviceSize probeStorageBytes_ = maxGiProbes * giProbeRecordVec4s * sizeof(float) * 4;
+    static constexpr VkDeviceSize probeStorageBytes_ = maxGiProbes * giProbeRecordFloats * sizeof(float);
     std::vector<VkBuffer>        probeStorageBuffers_;
     std::vector<VmaAllocation>   probeStorageAllocations_;
     std::vector<void *>          probeStorageMappings_;

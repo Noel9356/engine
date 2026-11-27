@@ -151,11 +151,24 @@ private:
             return invalidFluid;
         }
         if (!std::isfinite(description->interactionRadius) || description->interactionRadius <= 0.0
+            // The SPH kernels raise the interaction radius to the ninth
+            // power (h^9 in the poly6 denominator); beyond ~1.8e34 that
+            // overflows to Inf and turns every density estimate into NaN.
+            // The bound keeps h^9 (and every other kernel product) finite
+            // while staying far beyond any physical particle spacing.
+            || description->interactionRadius > 1.0e6
             || !std::isfinite(description->particleRadius) || description->particleRadius <= 0.0
             || !std::isfinite(description->particleMass) || description->particleMass <= 0.0
+            // Mass, rest density and stiffness magnitudes are bounded so
+            // pressure and force products stay finite (the rollback would
+            // contain the NaN, but every step would fail forever).
+            || description->particleMass > 1.0e6
             || !std::isfinite(description->restDensity) || description->restDensity <= 0.0
+            || description->restDensity > 1.0e6
             || !std::isfinite(description->gasStiffness) || description->gasStiffness < 0.0
+            || description->gasStiffness > 1.0e6
             || !std::isfinite(description->viscosity) || description->viscosity < 0.0
+            || description->viscosity > 1.0e6
             || !std::isfinite(description->damping) || description->damping < 0.0
             || (description->useBounds
                 && (!std::isfinite(description->boundsMinimum[0]) || !std::isfinite(description->boundsMinimum[1])
@@ -376,7 +389,8 @@ private:
             return true;
         }
         return stepFluid(
-            *fluid, settings_, rigid_, fixedDeltaSeconds * static_cast<double>(interval), substepsForBand(fluid->lodBand));
+            *fluid, settings_, rigid_, fixedDeltaSeconds * static_cast<double>(interval),
+            substepsForBand(fluid->lodBand), interval);
     }
 
     std::uint32_t simulateImpl(FluidHandle handle, double elapsedSeconds)

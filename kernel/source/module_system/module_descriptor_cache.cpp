@@ -40,6 +40,38 @@ bool splitCacheLine(const std::string &line, std::string &key, std::string &valu
     return true;
 }
 
+// Line-oriented cache safety: a value carrying a newline would inject a
+// bogus record line on reload and silently corrupt this or a neighbouring
+// entry, so such entries are skipped (the library is simply re-scanned on
+// the next launch; loadModuleLibrary re-hashes the real bytes before
+// dlopen, so a missing cache entry can never execute different code).
+bool cacheValueIsLineSafe(const std::string &value)
+{
+    return value.find('\n') == std::string::npos && value.find('\r') == std::string::npos;
+}
+
+bool cacheEntryIsLineSafe(const std::string &path, const ModuleDescriptorCacheEntry &entry)
+{
+    if (!cacheValueIsLineSafe(path) || !cacheValueIsLineSafe(entry.descriptor.name)
+        || !cacheValueIsLineSafe(entry.descriptor.version) || !cacheValueIsLineSafe(entry.contentSha256))
+    {
+        return false;
+    }
+    const auto listIsSafe = [](const std::vector<std::string> &values)
+    {
+        for (const std::string &value : values)
+        {
+            if (!cacheValueIsLineSafe(value))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    return listIsSafe(entry.descriptor.providedCapabilities) && listIsSafe(entry.descriptor.requiredCapabilities)
+        && listIsSafe(entry.descriptor.optionalCapabilities) && listIsSafe(entry.descriptor.declaredPermissions);
+}
+
 // Overflow-checked decimal parse for the size/mtime fields.
 bool parseDecimal(const std::string &text, std::uintmax_t &out)
 {
@@ -261,7 +293,10 @@ void ModuleDescriptorCache::save() const
     ordered.reserve(entries.size());
     for (const auto &entry : entries)
     {
-        ordered.push_back(&entry);
+        if (cacheEntryIsLineSafe(entry.first, entry.second))
+        {
+            ordered.push_back(&entry);
+        }
     }
     std::sort(ordered.begin(),
         ordered.end(),

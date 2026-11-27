@@ -298,11 +298,31 @@ private:
         }
         try
         {
-            CommandBufferHandle handle = record->nextCommandBuffer++;
+            // Probe past retired handles so a wrapped-around id can never
+            // silently land on a live command buffer.
+            CommandBufferHandle handle = invalidCommandBuffer;
+            for (std::size_t attempt = 0; attempt < record->commandBuffers.size() + 2u; ++attempt)
+            {
+                const CommandBufferHandle candidate = record->nextCommandBuffer++;
+                if (candidate != invalidCommandBuffer && !record->commandBuffers.contains(candidate))
+                {
+                    handle = candidate;
+                    break;
+                }
+            }
             if (handle == invalidCommandBuffer)
-                handle = record->nextCommandBuffer++;
+            {
+                setError(error, StorageError::CapacityExceeded);
+                return invalidCommandBuffer;
+            }
             auto commands = std::make_unique<CommandBuffer>(record->storage);
-            record->commandBuffers.emplace(handle, std::move(commands));
+            const auto [iterator, inserted] = record->commandBuffers.emplace(handle, std::move(commands));
+            (void)iterator;
+            if (!inserted)
+            {
+                setError(error, StorageError::CapacityExceeded);
+                return invalidCommandBuffer;
+            }
             return handle;
         }
         catch (...)
@@ -325,10 +345,30 @@ private:
         try
         {
             std::string name   = description->name == nullptr ? "world" : description->name;
-            WorldHandle handle = nextWorld_++;
+            // Probe past retired handles the same way entity_world does: a
+            // wrapped-around id must never silently reuse a live world.
+            WorldHandle handle = invalidWorld;
+            for (std::size_t attempt = 0; attempt < worlds_.size() + 2u; ++attempt)
+            {
+                const WorldHandle candidate = nextWorld_++;
+                if (candidate != invalidWorld && !worlds_.contains(candidate))
+                {
+                    handle = candidate;
+                    break;
+                }
+            }
             if (handle == invalidWorld)
-                handle = nextWorld_++;
-            worlds_.emplace(handle, std::make_unique<WorldRecord>(std::move(name), description->storage));
+            {
+                setError(error, StorageError::CapacityExceeded);
+                return invalidWorld;
+            }
+            const auto [iterator, inserted] = worlds_.emplace(handle, std::make_unique<WorldRecord>(std::move(name), description->storage));
+            (void)iterator;
+            if (!inserted)
+            {
+                setError(error, StorageError::CapacityExceeded);
+                return invalidWorld;
+            }
             return handle;
         }
         catch (...)

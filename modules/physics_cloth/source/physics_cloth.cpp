@@ -224,7 +224,16 @@ private:
                     = cloth.drag.stiffness * errorZ - cloth.drag.damping * cloth.velocities[offset + 2];
                 const double magnitude = std::sqrt(
                     accelerationX * accelerationX + accelerationY * accelerationY + accelerationZ * accelerationZ);
-                if (magnitude > cloth.drag.maximumAcceleration)
+                // An overflowed spring acceleration (extreme stiffness x
+                // error) reads as Inf; rescaling Inf by 0 would produce NaN,
+                // so a non-finite magnitude drops the acceleration entirely.
+                if (!std::isfinite(magnitude))
+                {
+                    accelerationX = 0.0;
+                    accelerationY = 0.0;
+                    accelerationZ = 0.0;
+                }
+                else if (magnitude > cloth.drag.maximumAcceleration)
                 {
                     const double scale = cloth.drag.maximumAcceleration / magnitude;
                     accelerationX *= scale;
@@ -376,8 +385,15 @@ private:
         // triangle's force (response x area) splits over its free corners,
         // and the area factor keeps the material response invariant under
         // resolution changes (finer grids apply smaller per-triangle forces).
+        // `relative` is the air's velocity against the surface, so the
+        // response pushes ALONG the normal's positive response: an upward
+        // wind under a canopy (positive n . v along the underside normal)
+        // pushes the canopy upwind, and a face slicing air is pushed back
+        // against its own motion. The previous negated sign flipped both -
+        // umbrellas sucked downward and falling cloth accelerated
+        // (runaway) instead of decelerating.
         const double acceleration
-            = -response * area / (cloth.particleMass * static_cast<double>(freeCount));
+            = response * area / (cloth.particleMass * static_cast<double>(freeCount));
         for (std::uint32_t corner = 0; corner < 3; ++corner)
         {
             const std::uint32_t particleIndex = particles[corner];
@@ -433,14 +449,18 @@ private:
                 continue;
             }
             // XPBD delta-lambda: the correction divides by (weight sum +
-            // compliance / dt^2), and the multiplier accumulates across the
-            // substep's solver iterations, so repeated passes through the
-            // compliance term soften the constraint exactly as the XPBD
-            // formulation prescribes (the accumulator resets at substep
-            // start; one iteration reduces to plain XPBD).
+            // compliance / dt^2) and the compliance term ALSO rides the
+            // numerator as -alpha~ * lambda (the accumulated multiplier's
+            // softening). The previous form subtracted the WHOLE lambda
+            // outside the fraction: with zero compliance the second
+            // iteration computed -lambda as its correction and exactly
+            // undid the first, so an even iteration count left the cloth
+            // unsolved and an odd count left it solved (oscillation), and
+            // with compliance the same accumulated overshoot appeared.
             const double complianceScaled = constraint.compliance * inverseDeltaTimeSquared;
             const double deltaLambda
-                = (-length + constraint.restLength) / (weightSum + complianceScaled) - constraint.lambda;
+                = (constraint.restLength - length - complianceScaled * constraint.lambda)
+                    / (weightSum + complianceScaled);
             constraint.lambda += deltaLambda;
             const double scaleX = deltaX / length * deltaLambda;
             const double scaleY = deltaY / length * deltaLambda;
@@ -605,10 +625,17 @@ private:
         }
     }
 
-    bool stepCloth(ClothRecord &cloth, double fixedDeltaSeconds, std::uint32_t substeps)
+    bool stepCloth(ClothRecord &cloth, double fixedDeltaSeconds, std::uint32_t substeps, std::uint32_t interval)
     {
         const auto stepStart = std::chrono::steady_clock::now();
-        if (!(fixedDeltaSeconds > 0.0) || fixedDeltaSeconds > 0.1 || !std::isfinite(fixedDeltaSeconds))
+        // The sanity cap applies PER MERGED FIXED STEP: a simulation-LOD due
+        // step legitimately integrates `interval` accumulated fixed deltas
+        // in one pass, so the accepted delta scales with the merge count.
+        // Capping the merged delta at the single-step bound instead would
+        // reject every Animation-band due step at the default 60 Hz (8 x
+        // 1/60 > 0.1) and freeze reduced-cadence cloths entirely.
+        const double maximumDelta = 0.1 * static_cast<double>(interval > 0u ? interval : 1u);
+        if (!(fixedDeltaSeconds > 0.0) || fixedDeltaSeconds > maximumDelta || !std::isfinite(fixedDeltaSeconds))
         {
             return false;
         }
@@ -745,6 +772,14 @@ private:
             return invalidCloth;
         }
         if (!math::isFinite(description->transform.position) || !math::isFinite(description->transform.rotation)
+            // The rotation must also NORMALIZE with finite arithmetic: the
+            // grid build feeds the quaternion straight into
+            // makeRotationMatrix, whose products overflow to Inf for huge
+            // finite components (e.g. 1e308) and whose formula assumes a
+            // unit quaternion. The rigid module's body path normalizes and
+            // re-checks; the cloth path must do the same before building.
+            || !std::isfinite(math::dot(description->transform.rotation, description->transform.rotation))
+            || math::dot(description->transform.rotation, description->transform.rotation) < 1.0e-12
             || !std::isfinite(description->spacing)
             || description->spacing <= 0.0 || !std::isfinite(description->particleMass)
             || description->particleMass <= 0.0 || !std::isfinite(description->stretchCompliance)
@@ -754,9 +789,11 @@ private:
             || !std::isfinite(description->friction) || description->friction < 0.0 || description->friction > 1.0
             || !std::isfinite(description->tearStrain) || description->tearStrain < 0.0
             || !std::isfinite(description->selfCollisionRadius) || description->selfCollisionRadius < 0.0
-            // A positive particle radius must be finite; the fallback below
-            // derives one from the spacing otherwise.
-            || (description->particleRadius > 0.0 && !std::isfinite(description->particleRadius))
+            // The particle radius follows the module's reject-negatives
+            // convention (the rope module's nodeRadius rejects the same way):
+            // a non-finite or NEGATIVE radius is an invalid description,
+            // while zero keeps the documented "derive from spacing" meaning.
+            || !std::isfinite(description->particleRadius) || description->particleRadius < 0.0
             // A non-empty pin list needs the indices array; an empty list
             // accepts a null pointer.
             || (description->pinnedCount > 0 && description->pinnedParticles == nullptr))
@@ -780,9 +817,7 @@ private:
             return invalidCloth;
         }
         cloth.particleRadius
-            = description->particleRadius > 0.0 && std::isfinite(description->particleRadius)
-                ? description->particleRadius
-                : description->spacing * 0.25;
+            = description->particleRadius > 0.0 ? description->particleRadius : description->spacing * 0.25;
         cloth.friction          = description->friction;
         cloth.damping           = description->damping;
         cloth.stretchCompliance = description->stretchCompliance;
@@ -801,7 +836,8 @@ private:
         cloth.contactFlags.assign(particleCount, 0u);
         cloth.contactNormals.resize(particleCount * 3);
 
-        const math::Mat3 rotation = math::makeRotationMatrix(description->transform.rotation);
+        const math::Mat3 rotation = math::makeRotationMatrix(
+            math::normalize(description->transform.rotation));
         for (std::uint32_t row = 0; row < description->rows; ++row)
         {
             for (std::uint32_t column = 0; column < description->columns; ++column)
@@ -1104,6 +1140,12 @@ private:
         cloth->dragTarget[0] = target[0];
         cloth->dragTarget[1] = target[1];
         cloth->dragTarget[2] = target[2];
+        // Moving the drag target is an interaction exactly like moving a pin:
+        // a sleeping cloth skips integration entirely, so the new target
+        // would never be applied until something else woke the cloth. Wake it
+        // (and reset the timer) like the sibling setters do.
+        cloth->sleeping   = false;
+        cloth->sleepTimer = 0.0;
         return true;
     }
 
@@ -1228,7 +1270,7 @@ private:
             cloth->sleepTimer = 0.0;
         }
         const double dueDelta = fixedDeltaSeconds * static_cast<double>(interval);
-        if (!stepCloth(*cloth, dueDelta, substepsForBand(cloth->lodBand)))
+        if (!stepCloth(*cloth, dueDelta, substepsForBand(cloth->lodBand), interval))
         {
             return false;
         }

@@ -48,7 +48,11 @@
 #include <bit>
 #include <cstdint>
 
-#if defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
+// The scalar fallback stays reachable on every platform (and testable - the
+// parity tests define ENGINE_SHADING_RUN_SCALAR to compile it on x86-64; the
+// override mirrors ENGINE_RASTERIZER_INLINE's pattern in wide_shading.hpp).
+#if !defined(ENGINE_SHADING_RUN_SCALAR) \
+    && (defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64))
 #define ENGINE_SHADING_RUN_SIMD 1
 #include <immintrin.h>
 #else
@@ -72,7 +76,6 @@ struct RunContext
     glm::vec3 ambientSky{0.0f};
     glm::vec3 ambientGround{0.0f};
     glm::vec3 baseColorFactor{1.0f};
-    float     opacity    = 1.0f;
     float     sheenFactor = 0.0f;
     // Output transform (the per-sample path applies it in the caller): the
     // run folds exposure + tone mapping in, so the returned colors are ready
@@ -136,6 +139,10 @@ struct RunInputs
 
 // The tone mappers' SoA twin (mirrors toneMapColor's per-channel math; the
 // exposure multiply is the caller's). Operates on the run's X/Y/Z registers.
+// SIMD-only: the scalar fallback tone-maps through toneMapColor directly,
+// and the declaration would not even compile without immintrin.h's types
+// (the fallback's own portability contract).
+#if ENGINE_SHADING_RUN_SIMD
 inline void toneMapSoA(__m128 &x, __m128 &y, __m128 &z, pbr::ToneMapping mapper)
 {
     switch (mapper)
@@ -167,6 +174,7 @@ inline void toneMapSoA(__m128 &x, __m128 &y, __m128 &z, pbr::ToneMapping mapper)
     }
     }
 }
+#endif // ENGINE_SHADING_RUN_SIMD
 
 // Shades the run's active lanes and returns the TONE-MAPPED colors (the
 // per-sample path's shadeTrianglePixel also tone-maps before returning; the
@@ -312,15 +320,17 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
     __m128 metallic = _mm_loadu_ps(inputs.metallic);
     __m128 roughness = _mm_loadu_ps(inputs.roughness);
     const __m128 occlusion = _mm_loadu_ps(inputs.occlusion);
-    const __m128 opacity = clamp01(_mm_set1_ps(context.opacity));
     metallic = clamp01(metallic);
     roughness = _mm_min_ps(_mm_max_ps(roughness, _mm_set1_ps(minimumRoughness)), _mm_set1_ps(1.0f));
 
-    // diffuseAlbedo = albedo * (1 - metallic) * opacity.
+    // diffuseAlbedo = albedo * (1 - metallic); the material's opacity never
+    // scales the diffuse here - mesh.frag's twin carries no such factor, and
+    // the commit paths apply the blend exactly once (see pbrShade's header
+    // note).
     const __m128 oneMinusMetallic = _mm_sub_ps(_mm_set1_ps(1.0f), metallic);
-    __m128 diffuseX = _mm_mul_ps(_mm_mul_ps(albX, oneMinusMetallic), opacity);
-    __m128 diffuseY = _mm_mul_ps(_mm_mul_ps(albY, oneMinusMetallic), opacity);
-    __m128 diffuseZ = _mm_mul_ps(_mm_mul_ps(albZ, oneMinusMetallic), opacity);
+    __m128 diffuseX = _mm_mul_ps(albX, oneMinusMetallic);
+    __m128 diffuseY = _mm_mul_ps(albY, oneMinusMetallic);
+    __m128 diffuseZ = _mm_mul_ps(albZ, oneMinusMetallic);
 
     // hemispheric = mix(ambientGround, ambientSky, normal.y * 0.5 + 0.5) *
     // diffuseAlbedo * occlusion; glm::mix(x, y, a) = x * (1 - a) + y * a.
@@ -403,11 +413,12 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
         _mm_mul_ps(albY, metallic));
     const __m128 f0Z = _mm_add_ps(_mm_mul_ps(_mm_set1_ps(dielectricF0.z), oneMinusMetallic),
         _mm_mul_ps(albZ, metallic));
-    // diffuse = albedo * ((1 - metallic) * invPi) * opacity.
+    // diffuse = albedo * ((1 - metallic) * invPi); no opacity factor (see the
+    // ambient block's note - the commit applies the blend once).
     const __m128 invPi = _mm_set1_ps(1.0f / glm::pi<float>());
-    const __m128 diffuseTermX = _mm_mul_ps(_mm_mul_ps(albX, _mm_mul_ps(oneMinusMetallic, invPi)), opacity);
-    const __m128 diffuseTermY = _mm_mul_ps(_mm_mul_ps(albY, _mm_mul_ps(oneMinusMetallic, invPi)), opacity);
-    const __m128 diffuseTermZ = _mm_mul_ps(_mm_mul_ps(albZ, _mm_mul_ps(oneMinusMetallic, invPi)), opacity);
+    const __m128 diffuseTermX = _mm_mul_ps(albX, _mm_mul_ps(oneMinusMetallic, invPi));
+    const __m128 diffuseTermY = _mm_mul_ps(albY, _mm_mul_ps(oneMinusMetallic, invPi));
+    const __m128 diffuseTermZ = _mm_mul_ps(albZ, _mm_mul_ps(oneMinusMetallic, invPi));
 
     const __m128 sunNDotL = _mm_max_ps(
         dot3(nrmX, nrmY, nrmZ, _mm_set1_ps(context.lightDirection.x), _mm_set1_ps(context.lightDirection.y),
@@ -507,10 +518,25 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
             outShaded[lane] = glm::vec3(0.0f);
             continue;
         }
-        const glm::vec3 albedo(context.albedo[0][lane], context.albedo[1][lane], context.albedo[2][lane]);
+        // Albedo source mirrors the SIMD path's two forms: the caller's
+        // per-lane values when it filled them (a base-color map or the
+        // procedural mottle), the corner colors times the base color factor
+        // otherwise. The fallback used to read inputs.albedo
+        // unconditionally, which shaded every albedoFilled=false draw black
+        // on platforms without SSE2 - the caller leaves the array zeroed
+        // exactly then, and only the SIMD branch derived the albedo itself.
+        const glm::vec3 albedo = context.albedoFilled
+            ? glm::vec3(inputs.albedo[0][lane], inputs.albedo[1][lane], inputs.albedo[2][lane])
+            : (inputs.correctedA[lane] * color[0] + inputs.correctedB[lane] * color[1]
+                  + inputs.correctedC[lane] * color[2])
+                  * context.baseColorFactor;
         if (context.unlit)
         {
-            outShaded[lane] = albedo;
+            // The output transform runs for unlit lanes too (the SIMD path's
+            // twin block above) unless deferred behind linear-space adds.
+            outShaded[lane] = toneMapColor(albedo,
+                context.toneMapInside ? context.exposure : 1.0f,
+                context.toneMapInside ? context.toneMapping : pbr::ToneMapping::None);
             continue;
         }
         glm::vec3 interpolatedPosition = inputs.correctedA[lane] * position[0] + inputs.correctedB[lane] * position[1]
@@ -544,23 +570,32 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
         giSample.occlusion = inputs.giOcclusion[lane];
         giSample.irradiance = glm::vec3(
             inputs.giIrradiance[0][lane], inputs.giIrradiance[1][lane], inputs.giIrradiance[2][lane]);
+        // Zenith sky visibility scales ONLY the hemispheric term (the SIMD
+        // path's skyVisible multiply): the scaled ambient pair feeds
+        // pbrShade's hemispheric source, and its GI blend mixes against the
+        // scaled hemispheric exactly like the SIMD kernel does.
+        const float skyVisible = inputs.skyVisibility[lane];
+        // pbrShade's giGrid slot takes nullptr here (the run kernel carries
+        // no probe grid - the caller already resolved the lane's sample into
+        // giSample; the earlier form passed the GiAmbientSample* in the
+        // PreparedGiProbeGrid* slot, which never compiled and would have
+        // reinterpreted the sample as a grid had it).
         outShaded[lane] = toneMapColor(pbrShade(shadingNormal,
             interpolatedPosition,
             context.cameraPosition,
             context.lightDirection,
             context.sunRadiance * inputs.sunVisibility[lane],
-            context.ambientSky,
-            context.ambientGround,
+            context.ambientSky * skyVisible,
+            context.ambientGround * skyVisible,
             albedo,
             inputs.metallic[lane],
             inputs.roughness[lane],
             inputs.occlusion[lane],
             nullptr,
             0u,
-            giSample.valid ? &giSample : nullptr,
-            context.opacity,
+            nullptr,
             context.sheenFactor,
-            &giSample),
+            giSample.valid ? &giSample : nullptr),
             context.toneMapInside ? context.exposure : 1.0f,
             context.toneMapInside ? context.toneMapping : pbr::ToneMapping::None);
     }

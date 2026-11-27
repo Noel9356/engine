@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <limits>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 #include <vulkan/vulkan_core.h>
 
@@ -608,6 +609,36 @@ bool VulkanSwapchain::recreate(VkRenderPass renderPass, std::uint32_t viewportWi
     return true;
 }
 
+// Mirrors createObjects's extent resolution (see the header comment): a
+// rebuild only produces a new extent when the surface's currentExtent
+// actually moved, or - on UINT32_MAX compositor reports - when the requested
+// viewport (the fallback input) moved. A failed capabilities query reports
+// no change; the OUT_OF_DATE dirty path still covers a real resize the
+// missed query would have caught.
+bool VulkanSwapchain::extentWouldChange(std::uint32_t viewportWidth, std::uint32_t viewportHeight) const
+{
+    if (swapchain_ == VK_NULL_HANDLE)
+    {
+        return true;
+    }
+    VkSurfaceCapabilitiesKHR capabilities{};
+    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device_.physicalDevice(), surface_, &capabilities) != VK_SUCCESS)
+    {
+        return false;
+    }
+    VkExtent2D resolved = capabilities.currentExtent;
+    if (resolved.width == UINT32_MAX || resolved.height == UINT32_MAX)
+    {
+        resolved.width  = viewportWidth != 0 ? viewportWidth : capabilities.minImageExtent.width;
+        resolved.height = viewportHeight != 0 ? viewportHeight : capabilities.minImageExtent.height;
+    }
+    resolved.width
+        = std::clamp(resolved.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+    resolved.height
+        = std::clamp(resolved.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+    return resolved.width != extent_.width || resolved.height != extent_.height;
+}
+
 namespace
 {
 // Upper bound on how long vkAcquireNextImageKHR may block waiting for a free
@@ -715,15 +746,35 @@ void VulkanSwapchain::finishReadback(
         return;
     }
     RenderError exportError = RenderError::None;
-    if (png)
+    try
     {
-        writePng(filePath, width, height, static_cast<const std::uint8_t *>(mapped),
-            static_cast<std::size_t>(width) * 4, false, bgra, &exportError);
+        if (png)
+        {
+            writePng(filePath, width, height, static_cast<const std::uint8_t *>(mapped),
+                static_cast<std::size_t>(width) * 4, false, bgra, &exportError);
+        }
+        else
+        {
+            writePpm(filePath, width, height, static_cast<const std::uint8_t *>(mapped),
+                static_cast<std::size_t>(width) * 4, false, bgra, &exportError);
+        }
     }
-    else
+    catch (const std::bad_alloc &)
     {
-        writePpm(filePath, width, height, static_cast<const std::uint8_t *>(mapped),
-            static_cast<std::size_t>(width) * 4, false, bgra, &exportError);
+        // The PNG/PPM writers build several full-image buffers (packed rows,
+        // the filtered stream, the deflate output); an allocation failure
+        // here must not escape through beginFrame's export completion into
+        // the application's frame loop (the same capability-boundary class
+        // the backend snapshot copies harden against), and the readback
+        // mapping below must still be released. Report the failure through
+        // the same error path the writers use; the callers log it.
+        exportError = RenderError::CreationFailed;
+    }
+    catch (const std::length_error &)
+    {
+        // vector::resize/reserve with a size beyond max_size (the belt for a
+        // hostile width/height pair that survived the guards above).
+        exportError = RenderError::CreationFailed;
     }
     device_.unmapAllocation(readbackAllocation_);
     if (error != nullptr)

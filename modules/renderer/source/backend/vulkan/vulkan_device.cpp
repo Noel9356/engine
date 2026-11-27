@@ -539,6 +539,53 @@ std::unique_ptr<VulkanDeviceContext> VulkanDeviceContext::create(window::WindowH
     if (supportedFeatures2.features.samplerAnisotropy == VK_TRUE)
         enabledFeatures2.features.samplerAnisotropy = VK_TRUE;
 
+    // Dynamic rendering must actually be ENABLED here, not just reported in
+    // the profile: the renderer's MSAA (>= 2 sample) path records its frames
+    // with vkCmdBeginRendering and builds its pipelines with a null render
+    // pass, which is illegal unless this feature is on. Vulkan 1.3 devices
+    // flip it in the Vulkan13Features chain; older devices promote the
+    // VK_KHR_dynamic_rendering extension and chain its own feature struct
+    // (Vulkan13Features may not ride a sub-1.3 device). Devices without the
+    // feature stay off them - the renderer then clamps to one sample (the
+    // render-pass path has no multisample resolve).
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR enabledDynamicRendering{};
+    enabledDynamicRendering.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+    enabledDynamicRendering.pNext = nullptr;
+    {
+        VkPhysicalDeviceProperties preCreateProperties{};
+        vkGetPhysicalDeviceProperties(context->physicalDevice_, &preCreateProperties);
+        const std::uint32_t apiMajor      = VK_API_VERSION_MAJOR(preCreateProperties.apiVersion);
+        const std::uint32_t apiMinor      = VK_API_VERSION_MINOR(preCreateProperties.apiVersion);
+        const bool          core13        = apiMajor > 1u || (apiMajor == 1u && apiMinor >= 3u);
+        if (supported13.dynamicRendering == VK_TRUE)
+        {
+            if (core13)
+            {
+                enabled13.dynamicRendering = VK_TRUE;
+            }
+            else
+            {
+                std::uint32_t extCount = 0;
+                vkEnumerateDeviceExtensionProperties(context->physicalDevice_, nullptr, &extCount, nullptr);
+                std::vector<VkExtensionProperties> exts(extCount);
+                if (extCount > 0)
+                {
+                    vkEnumerateDeviceExtensionProperties(context->physicalDevice_, nullptr, &extCount, exts.data());
+                }
+                const bool hasDynamicRendering = std::any_of(exts.begin(),
+                    exts.end(),
+                    [](const VkExtensionProperties &e)
+                    { return std::strcmp(e.extensionName, "VK_KHR_dynamic_rendering") == 0; });
+                if (hasDynamicRendering)
+                {
+                    enabledDynamicRendering.dynamicRendering = VK_TRUE;
+                    enabled13.pNext                          = &enabledDynamicRendering;
+                    deviceExtensionsVec.push_back("VK_KHR_dynamic_rendering");
+                }
+            }
+        }
+    }
+
     bool hasConservativeRaster = false;
     {
         std::uint32_t extCount = 0;
@@ -712,7 +759,11 @@ std::unique_ptr<VulkanDeviceContext> VulkanDeviceContext::create(window::WindowH
         const bool          core13              = apiMajor > 1u || (apiMajor == 1u && apiMinor >= 3u);
         profile.timelineSemaphoreAvailable      = core12 || hasExtension("VK_KHR_timeline_semaphore");
         profile.descriptorIndexingAvailable     = core12 || hasExtension("VK_EXT_descriptor_indexing");
-        profile.dynamicRenderingAvailable       = core13 || hasExtension("VK_KHR_dynamic_rendering");
+        // The dynamic-rendering path requires the FEATURE (queried above),
+        // not merely core-1.3 or the extension's presence: some drivers
+        // expose the extension with the feature unsupported.
+        profile.dynamicRenderingAvailable       = supported13.dynamicRendering == VK_TRUE
+            && (core13 || hasExtension("VK_KHR_dynamic_rendering"));
         profile.memoryBudgetExtensionAvailable  = chosenMemoryBudgetAvailable;
         profile.rayTracingExtensionSetAvailable = hasExtension("VK_KHR_acceleration_structure")
                                                && hasExtension("VK_KHR_ray_tracing_pipeline")
@@ -923,8 +974,40 @@ bool VulkanDeviceContext::flushAllocation(VmaAllocation allocation) const
 
 bool VulkanDeviceContext::flushAllocation(VmaAllocation allocation, VkDeviceSize offset, VkDeviceSize size) const
 {
-    return allocator_ != nullptr && allocation != nullptr
-        && vmaFlushAllocation(allocator_, allocation, offset, size) == VK_SUCCESS;
+    if (allocator_ == nullptr || allocation == nullptr)
+    {
+        return false;
+    }
+    // vmaFlushAllocation maps straight onto vkFlushMappedMemoryRanges, whose
+    // offset and size must respect limits::nonCoherentAtomSize on
+    // non-host-coherent memory. Round the range outward (offset down to the
+    // atom, end up to the atom) and clamp to the allocation's bounds, so
+    // the direct per-buffer flushes (the instance stream, the overlay
+    // scratch, the dynamic-mesh staging) stay spec-valid on every device.
+    // The staging pool already rounds its own spans the same way - the extra
+    // rounding there is idempotent.
+    VkDeviceSize flushOffset = offset;
+    VkDeviceSize flushSize   = size;
+    if (size != VK_WHOLE_SIZE && nonCoherentAtomSize_ > 1)
+    {
+        VmaAllocationInfo allocationInfo{};
+        vmaGetAllocationInfo(allocator_, allocation, &allocationInfo);
+        const VkDeviceSize roundedOffset = (flushOffset / nonCoherentAtomSize_) * nonCoherentAtomSize_;
+        VkDeviceSize       roundedEnd    = flushOffset + flushSize;
+        const VkDeviceSize roundCapacity = std::numeric_limits<VkDeviceSize>::max() - nonCoherentAtomSize_;
+        if (roundedEnd > roundCapacity || (roundedEnd % nonCoherentAtomSize_) != 0)
+        {
+            roundedEnd = ((roundedEnd / nonCoherentAtomSize_) + 1) * nonCoherentAtomSize_;
+        }
+        roundedEnd = std::min(roundedEnd, allocationInfo.size);
+        if (roundedEnd <= roundedOffset)
+        {
+            return true; // nothing valid left to flush after rounding
+        }
+        flushOffset = roundedOffset;
+        flushSize   = roundedEnd - roundedOffset;
+    }
+    return vmaFlushAllocation(allocator_, allocation, flushOffset, flushSize) == VK_SUCCESS;
 }
 
 bool VulkanDeviceContext::invalidateAllocation(VmaAllocation allocation) const
@@ -1293,9 +1376,31 @@ bool VulkanDeviceContext::copyHostToDevice(const BufferUpload *uploads, std::uin
             .size                = uploads[index].size,
         };
     }
+    // The destination stage follows the requests' access masks (the current
+    // callers upload vertex/index data, but a future uniform or storage
+    // upload must not land in a vertex-input-only barrier): every access
+    // bit contributes its earliest consuming stage, and the OR of them all
+    // is a valid dependency-only barrier destination.
+    VkPipelineStageFlags destinationStages = 0;
+    for (std::uint32_t index = 0; index < uploadCount; ++index)
+    {
+        const VkAccessFlags access = uploads[index].destinationAccess;
+        if ((access & (VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT)) != 0)
+            destinationStages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+        if ((access & (VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)) != 0)
+            destinationStages |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        if ((access & VK_ACCESS_TRANSFER_READ_BIT) != 0)
+            destinationStages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+        if ((access & VK_ACCESS_INDIRECT_COMMAND_READ_BIT) != 0)
+            destinationStages |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+    }
+    if (destinationStages == 0)
+    {
+        destinationStages = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT; // conservative default
+    }
     vkCmdPipelineBarrier(command,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+        destinationStages,
         0,
         0,
         nullptr,
@@ -1403,26 +1508,18 @@ bool VulkanDeviceContext::acquireStagingSpan(VkDeviceSize size, UploadStaging *o
         if (result == StagingPool::AcquireResult::UseFallback)
             return false;
 
-        // NeedNewBlock: create the block storage, hand it to the policy, retry.
+        // NeedNewBlock: create the block storage, register it with the
+        // policy, retry. The storage entry is appended BEFORE the pool
+        // registers the block: with the old order, a beginBlock that
+        // succeeded followed by a throwing push_back left a phantom block
+        // in the pool's books forever - the pool kept counting its capacity
+        // against the byte cap while no span could ever be served from (or
+        // release) storage the device context no longer held. Registering
+        // first means every failure path below removes the entry again, and
+        // the pool never learns about a block whose storage died.
         StagingBlockStorage block;
         if (!createMappedStagingBlock(static_cast<VkDeviceSize>(newCapacity), &block))
             return false;
-        StagingPool::BlockToken token = StagingPool::invalidBlock;
-        try
-        {
-            token = stagingPool_.beginBlock(static_cast<std::uint64_t>(block.capacity));
-        }
-        catch (...)
-        {
-            destroyStagingBlock(block);
-            return false;
-        }
-        if (token == StagingPool::invalidBlock)
-        {
-            destroyStagingBlock(block);
-            return false;
-        }
-        block.token = token;
         try
         {
             stagingStorage_.push_back(block);
@@ -1432,6 +1529,25 @@ bool VulkanDeviceContext::acquireStagingSpan(VkDeviceSize size, UploadStaging *o
             destroyStagingBlock(block);
             return false;
         }
+        StagingPool::BlockToken token = StagingPool::invalidBlock;
+        try
+        {
+            token = stagingPool_.beginBlock(static_cast<std::uint64_t>(block.capacity));
+        }
+        catch (...)
+        {
+            token = StagingPool::invalidBlock;
+        }
+        if (token == StagingPool::invalidBlock)
+        {
+            // beginBlock either threw before touching pool state or refused
+            // under the byte cap: nothing was registered, so dropping the
+            // entry here keeps the two sides consistent.
+            stagingStorage_.pop_back();
+            destroyStagingBlock(block);
+            return false;
+        }
+        stagingStorage_.back().token = token;
     }
     return false;
 }

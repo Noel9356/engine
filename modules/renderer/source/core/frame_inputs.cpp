@@ -66,6 +66,11 @@ void FrameInputs::pushEnvironment(RenderBackend &backend, const pbr::PbrCapabili
 void FrameInputs::pushDirectLights(RenderBackend &backend, const direct_lighting::DirectLightingCapability *directLighting,
     std::uint32_t lightLimit)
 {
+    // The copy below fills the fixed maxDirectLights scratch, so the limit is
+    // clamped here instead of trusting every caller to respect the array's
+    // bound (the module's renderer record negotiates it, but this class owns
+    // the buffer it writes into).
+    lightLimit = std::min(lightLimit, direct_lighting::maxDirectLights);
     if (directLighting != nullptr && directLighting->copyLights != nullptr)
     {
         std::uint64_t version = 0;
@@ -136,8 +141,21 @@ void FrameInputs::pushProbeGrid(RenderBackend &backend, const radiance_cache::Ra
             backend.setProbeGrid(grid);
             probeGridVersion     = version;
             probeGridInitialized = true;
+            probeGridLastEnabled = true;
         }
         return;
+    }
+    if (probeGridLastEnabled)
+    {
+        // The feed went quiet after it was live (the consumer disabled it or
+        // the provider vanished): clear the backend's last snapshot ONCE so
+        // the stale grid cannot keep lighting frames as if the provider
+        // still published. Resetting the initialized marker lets a re-enable
+        // re-push the provider's current data even when its version did not
+        // change since.
+        backend.setProbeGrid(GiProbeGrid{});
+        probeGridInitialized  = false;
+        probeGridLastEnabled = false;
     }
     if (!probeGridInitialized)
     {
@@ -216,8 +234,20 @@ void FrameInputs::pushReflectionField(
             backend.setReflectionField(field);
             reflectionFieldVersion     = version;
             reflectionFieldInitialized = true;
+            reflectionFieldLastEnabled = true;
         }
         return;
+    }
+    if (reflectionFieldLastEnabled)
+    {
+        // The feed went quiet after it was live: clear the backend's last
+        // snapshot ONCE (a stale field would keep its reflections running as
+        // if the provider still published) and reset the initialized marker
+        // so a re-enable re-pushes the current data even at an unchanged
+        // version.
+        backend.setReflectionField(ReflectionField{});
+        reflectionFieldInitialized  = false;
+        reflectionFieldLastEnabled = false;
     }
     if (!reflectionFieldInitialized)
     {
@@ -293,8 +323,20 @@ void FrameInputs::pushGatherField(RenderBackend &backend, const radiance_cache::
             backend.setGatherField(field);
             gatherFieldVersion     = version;
             gatherFieldInitialized = true;
+            gatherFieldLastEnabled = true;
         }
         return;
+    }
+    if (gatherFieldLastEnabled)
+    {
+        // The feed went quiet after it was live: clear the backend's last
+        // snapshot ONCE (a stale gather field would keep its ambient running
+        // as if the provider still published) and reset the initialized
+        // marker so a re-enable re-pushes the current data even at an
+        // unchanged version.
+        backend.setGatherField(GatherField{});
+        gatherFieldInitialized  = false;
+        gatherFieldLastEnabled = false;
     }
     if (!gatherFieldInitialized)
     {

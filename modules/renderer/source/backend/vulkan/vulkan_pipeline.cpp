@@ -278,6 +278,61 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
                 resultName(renderPassResult, resultScratch, sizeof(resultScratch)));
             return false;
         }
+
+        // Resume twin of the render pass for the mid-frame mesh-vertex update
+        // path (see VulkanBackend::recordDynamicMeshUpdate): transfer commands
+        // are illegal inside a render pass instance, so that path ends the
+        // pass to record its copy and re-begins drawing here. The attachments
+        // match the original exactly (formats and sample counts, so the
+        // framebuffers stay compatible and rebind unchanged), but every load
+        // operation is LOAD - the frame's already-drawn contents survive - and
+        // the color attachment's initial layout is PRESENT_SRC_KHR, the
+        // layout the interrupted first instance left the swapchain image in
+        // (its finalLayout). The resume instance leaves it there again, so
+        // endFrame presents exactly as the uninterrupted frame would.
+        const VkAttachmentDescription resumeColorAttachment{
+            .flags          = 0,
+            .format         = colorFormat,
+            .samples        = sampleCount_,
+            .loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD,
+            .storeOp        = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout  = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        };
+        const VkAttachmentDescription resumeDepthAttachment{
+            .flags          = 0,
+            .format         = depthFormat,
+            .samples        = sampleCount_,
+            .loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD,
+            .storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            .finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        };
+        const VkAttachmentDescription resumeAttachments[2] = {resumeColorAttachment, resumeDepthAttachment};
+        const VkRenderPassCreateInfo  resumePassInfo{
+            .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+            .pNext           = nullptr,
+            .flags           = 0,
+            .attachmentCount = 2,
+            .pAttachments    = resumeAttachments,
+            .subpassCount    = 1,
+            .pSubpasses      = &subpass,
+            .dependencyCount = 1,
+            .pDependencies   = &dependency,
+        };
+        const VkResult resumePassResult
+            = vkCreateRenderPass(vulkanDevice, &resumePassInfo, nullptr, &renderPassResume_);
+        if (resumePassResult != VK_SUCCESS)
+        {
+            std::fprintf(stderr,
+                "renderer module: vkCreateRenderPass (resume twin) failed (%s)\n",
+                resultName(resumePassResult, resultScratch, sizeof(resultScratch)));
+            return false;
+        }
     }
 
     {
@@ -417,18 +472,26 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             return false;
         }
     }
-    // The mesh pipeline exists in four variants: the default (writes depth,
+    // The mesh pipeline exists in six variants: the default (writes depth,
     // like every opaque pass), a no-write twin for backdrop materials whose
     // depthWrite flag is off (depth testing stays on; the shell must not
-    // poison the depth buffer the opaque passes draw into), and a two-sided
+    // poison the depth buffer the opaque passes draw into), a two-sided
     // twin of each (cull mode NONE) for double-sided materials whose
-    // fragments may face either way (cloth sheets, flags, thin shells).
-    // Everything else - layout, shaders, blend - is identical, so one
-    // builder lambda stamps all four.
-    const auto createMeshPipeline = [&](bool depthWriteEnable, bool twoSided, VkPipeline &outPipeline) -> bool
+    // fragments may face either way (cloth sheets, flags, thin shells), and a
+    // transparent twin of the two-sided pair (src-alpha blending, depth
+    // write off) for materials whose opacity is below 1 - the transparent
+    // pass the material contract documents; mesh.frag already writes
+    // oColor.a for this blend.
+    // Everything else - layout, shaders, dynamic state - is identical, so
+    // one builder lambda stamps all six.
+    const auto createMeshPipeline = [&](bool depthWriteEnable, bool twoSided, bool transparent, VkPipeline &outPipeline) -> bool
     {
-        static const std::uint32_t            specData[2]    = {static_cast<std::uint32_t>(direct_lighting::maxDirectLights), srgbOutput_ ? 1u : 0u}; // MAX_LIGHTS, SRGB_OUT
-        static const VkSpecializationMapEntry specEntries[2] = {
+        // Plain locals (not static): the values derive from this build's own
+        // srgbOutput_, so a second renderer in the process with a different
+        // surface format must specialize from ITS own value - a function-local
+        // static would keep the first renderer's constant forever.
+        const std::uint32_t                  specData[2]    = {static_cast<std::uint32_t>(direct_lighting::maxDirectLights), srgbOutput_ ? 1u : 0u}; // MAX_LIGHTS, SRGB_OUT
+        const VkSpecializationMapEntry specEntries[2] = {
             {0, 0, sizeof(std::uint32_t)},
             {6, sizeof(std::uint32_t), sizeof(std::uint32_t)},
         };
@@ -496,6 +559,14 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
         };
 
         const VkCullModeFlags cullMode = (cullBackFaces_ && !twoSided) ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+        // Consumers supply OpenGL-convention camera matrices (mesh.vert's
+        // comment; the engine's front faces are CCW in that convention), and
+        // the frame uniform's clip fixup flips Y into Vulkan clip space. The
+        // flip mirrors every triangle's winding in the Y-down framebuffer
+        // space, so a GL front face rasterizes as CLOCKWISE there: keeping
+        // frontFace COUNTER_CLOCKWISE would cull every front face as a back
+        // face under cullBackFaces_. CLOCKWISE keeps GL front faces as the
+        // pipeline's front faces after the flip.
         const VkPipelineRasterizationStateCreateInfo rasterization{
             .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .pNext                   = nullptr,
@@ -504,7 +575,7 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             .rasterizerDiscardEnable = VK_FALSE,
             .polygonMode             = VK_POLYGON_MODE_FILL,
             .cullMode                = cullMode,
-            .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            .frontFace               = VK_FRONT_FACE_CLOCKWISE,
             .depthBiasEnable         = VK_FALSE,
             .depthBiasConstantFactor = 0.0f,
             .depthBiasClamp          = 0.0f,
@@ -527,7 +598,7 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             .pNext                 = nullptr,
             .flags                 = 0,
             .depthTestEnable       = VK_TRUE,
-            .depthWriteEnable      = depthWriteEnable ? VK_TRUE : VK_FALSE,
+            .depthWriteEnable      = (depthWriteEnable && !transparent) ? VK_TRUE : VK_FALSE,
             .depthCompareOp        = VK_COMPARE_OP_LESS,
             .depthBoundsTestEnable = VK_FALSE,
             .stencilTestEnable     = VK_FALSE,
@@ -536,17 +607,34 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             .minDepthBounds        = 0.0f,
             .maxDepthBounds        = 1.0f,
         };
-        const VkPipelineColorBlendAttachmentState colorAttachment{
-            .blendEnable         = VK_FALSE,
-            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
-            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
-            .colorBlendOp        = VK_BLEND_OP_ADD,
-            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
-            .alphaBlendOp        = VK_BLEND_OP_ADD,
-            .colorWriteMask
-            = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-        };
+        // Blend state: the opaque variants write straight through; the
+        // transparent twins blend src-alpha / one-minus-src-alpha (the same
+        // fixed-function blend the fur and overlay pipelines and the headless
+        // rasterizer's transparent commit use, matching oColor.a's
+        // opacity-times-texel-alpha).
+        VkPipelineColorBlendAttachmentState colorAttachment{};
+        if (transparent)
+        {
+            colorAttachment.blendEnable         = VK_TRUE;
+            colorAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            colorAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            colorAttachment.colorBlendOp        = VK_BLEND_OP_ADD;
+            colorAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            colorAttachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+        }
+        else
+        {
+            colorAttachment.blendEnable         = VK_FALSE;
+            colorAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            colorAttachment.colorBlendOp        = VK_BLEND_OP_ADD;
+            colorAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            colorAttachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+        }
+        colorAttachment.colorWriteMask
+            = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
         const VkPipelineColorBlendStateCreateInfo colorBlend{
             .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             .pNext           = nullptr,
@@ -603,17 +691,29 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
                 .initialDataSize = initialData.size(),
                 .pInitialData    = initialData.empty() ? nullptr : initialData.data(),
             };
-            if (vkCreatePipelineCache(vulkanDevice, &cacheInfo, nullptr, &pipelineCache_) != VK_SUCCESS
-                && !initialData.empty())
+            if (vkCreatePipelineCache(vulkanDevice, &cacheInfo, nullptr, &pipelineCache_) != VK_SUCCESS)
             {
-                const VkPipelineCacheCreateInfo emptyCacheInfo{
-                    .sType           = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
-                    .pNext           = nullptr,
-                    .flags           = 0,
-                    .initialDataSize = 0,
-                    .pInitialData    = nullptr,
-                };
-                (void)vkCreatePipelineCache(vulkanDevice, &emptyCacheInfo, nullptr, &pipelineCache_);
+                // A failed creation leaves the handle's contents unspecified,
+                // and the graphics-pipeline creations below accept a null
+                // cache (they simply run uncached): only a provably null
+                // handle may reach them. A non-empty seeding payload gets one
+                // retry with an empty cache - stale or foreign cache data is
+                // dropped, which the disk-seed failure already implies.
+                pipelineCache_ = VK_NULL_HANDLE;
+                if (!initialData.empty())
+                {
+                    const VkPipelineCacheCreateInfo emptyCacheInfo{
+                        .sType           = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+                        .pNext           = nullptr,
+                        .flags           = 0,
+                        .initialDataSize = 0,
+                        .pInitialData    = nullptr,
+                    };
+                    if (vkCreatePipelineCache(vulkanDevice, &emptyCacheInfo, nullptr, &pipelineCache_) != VK_SUCCESS)
+                    {
+                        pipelineCache_ = VK_NULL_HANDLE;
+                    }
+                }
             }
         }
 
@@ -658,25 +758,37 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
         }
         return true;
     };
-    if (!createMeshPipeline(true, false, pipeline_))
+    if (!createMeshPipeline(true, false, false, pipeline_))
     {
         vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
         vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
         return false;
     }
-    if (!createMeshPipeline(false, false, pipelineNoDepthWrite_))
+    if (!createMeshPipeline(false, false, false, pipelineNoDepthWrite_))
     {
         vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
         vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
         return false;
     }
-    if (!createMeshPipeline(true, true, pipelineTwoSided_))
+    if (!createMeshPipeline(true, true, false, pipelineTwoSided_))
     {
         vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
         vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
         return false;
     }
-    if (!createMeshPipeline(false, true, pipelineTwoSidedNoDepthWrite_))
+    if (!createMeshPipeline(false, true, false, pipelineTwoSidedNoDepthWrite_))
+    {
+        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
+        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
+        return false;
+    }
+    if (!createMeshPipeline(false, false, true, pipelineTransparent_))
+    {
+        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
+        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
+        return false;
+    }
+    if (!createMeshPipeline(false, true, true, pipelineTransparentTwoSided_))
     {
         vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
         vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
@@ -776,8 +888,9 @@ bool VulkanPipeline::buildFurPipeline(VkDevice device, char *resultScratch, std:
 
     // Same specialization contract as the mesh pipeline: MAX_LIGHTS
     // (constant_id 0) and SRGB_OUTPUT (constant_id 6) on the fragment stage.
-    static const std::uint32_t            specData[2]    = {static_cast<std::uint32_t>(direct_lighting::maxDirectLights), srgbOutput_ ? 1u : 0u};
-    static const VkSpecializationMapEntry specEntries[2] = {
+    // Plain locals, same reason as the mesh pipeline's: per-build values.
+    const std::uint32_t                  specData[2]    = {static_cast<std::uint32_t>(direct_lighting::maxDirectLights), srgbOutput_ ? 1u : 0u};
+    const VkSpecializationMapEntry specEntries[2] = {
         {0, 0, sizeof(std::uint32_t)},
         {6, sizeof(std::uint32_t), sizeof(std::uint32_t)},
     };
@@ -852,7 +965,10 @@ bool VulkanPipeline::buildFurPipeline(VkDevice device, char *resultScratch, std:
         .rasterizerDiscardEnable = VK_FALSE,
         .polygonMode             = VK_POLYGON_MODE_FILL,
         .cullMode                = cullBackFaces_ ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE,
-        .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        // CLOCKWISE for the same reason as the mesh pipeline: the clip fixup
+        // mirrors winding, so GL front faces must read as this pipeline's
+        // front faces after the flip.
+        .frontFace               = VK_FRONT_FACE_CLOCKWISE,
         .depthBiasEnable         = VK_FALSE,
         .depthBiasConstantFactor = 0.0f,
         .depthBiasClamp          = 0.0f,
@@ -1146,9 +1262,23 @@ bool VulkanPipeline::buildOverlayPipeline(VkDevice device, char *resultScratch, 
         .dynamicStateCount = 2,
         .pDynamicStates    = dynamicStates,
     };
+    // Same dynamic-rendering chain the mesh/fur pipelines attach: the
+    // pipeline declares its attachment formats inline instead of relying on
+    // a null render pass alone.
+    const VkFormat overlayColorFormat = renderTargetColorFormat_;
+    const VkFormat overlayDepthFormat = renderTargetDepthFormat_;
+    const VkPipelineRenderingCreateInfo renderingInfo{
+        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .pNext                   = nullptr,
+        .viewMask                = 0,
+        .colorAttachmentCount    = 1,
+        .pColorAttachmentFormats = &overlayColorFormat,
+        .depthAttachmentFormat   = overlayDepthFormat,
+        .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+    };
     const VkGraphicsPipelineCreateInfo pipelineInfo{
         .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext               = nullptr,
+        .pNext               = dynamicRenderingEnabled_ ? &renderingInfo : nullptr,
         .flags               = 0,
         .stageCount          = 2,
         .pStages             = stages,
@@ -1227,6 +1357,16 @@ void VulkanPipeline::destroy(VkDevice device)
         vkDestroyPipeline(device, pipelineTwoSidedNoDepthWrite_, nullptr);
         pipelineTwoSidedNoDepthWrite_ = VK_NULL_HANDLE;
     }
+    if (pipelineTransparent_ != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, pipelineTransparent_, nullptr);
+        pipelineTransparent_ = VK_NULL_HANDLE;
+    }
+    if (pipelineTransparentTwoSided_ != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, pipelineTransparentTwoSided_, nullptr);
+        pipelineTransparentTwoSided_ = VK_NULL_HANDLE;
+    }
     if (pipelineLayout_ != VK_NULL_HANDLE)
     {
         vkDestroyPipelineLayout(device, pipelineLayout_, nullptr);
@@ -1246,6 +1386,11 @@ void VulkanPipeline::destroy(VkDevice device)
     {
         vkDestroyRenderPass(device, renderPass_, nullptr);
         renderPass_ = VK_NULL_HANDLE;
+    }
+    if (renderPassResume_ != VK_NULL_HANDLE)
+    {
+        vkDestroyRenderPass(device, renderPassResume_, nullptr);
+        renderPassResume_ = VK_NULL_HANDLE;
     }
     if (pipelineCache_ != VK_NULL_HANDLE)
     {

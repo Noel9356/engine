@@ -166,10 +166,20 @@ if(CMAKE_CXX_COMPILER_ID
         engine_module_renderer
         PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-math-errno;-funroll-loops>
     )
+    # -ffast-math for the CPU rasterizer, minus its -ffinite-math-only
+    # component: that flag makes GCC fold std::isfinite() to constant true,
+    # silently deleting every NaN/Inf guard in the translation unit (mesh
+    # bounds validation, clip-space rejection, degenerate-projection
+    # handling), and it licenses comparison reorderings that are invalid for
+    # the NaN-propagating std::min/std::max semantics the output encoders
+    # (render_shared.hpp) and the near-plane clip walk are written against.
+    # The rest of -ffast-math (reassociation, no signed zeros, no math errno)
+    # stays; the finiteness guards in this file use the flag-proof
+    # finite_math.hpp bit test regardless.
     set_source_files_properties(
         source/backend/headless/headless_backend.cpp
         PROPERTIES COMPILE_OPTIONS
-                   "-ffast-math;-fno-math-errno;-funroll-loops"
+                   "-ffast-math;-fno-finite-math-only;-fno-math-errno;-funroll-loops"
     )
 endif()
 

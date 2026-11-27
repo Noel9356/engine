@@ -197,7 +197,11 @@ private:
                     "physics_fur module: clamping [physics_fur] lod_fade_fraction %g to range (0..1]\n",
                     *fadeFraction);
             }
-            lodBands_.fadeFraction = static_cast<float>(std::clamp(*fadeFraction, 0.01, 1.0));
+            // std::clamp passes NaN through (both comparisons are false),
+            // so a non-finite value is replaced with the default BEFORE the
+            // clamp instead of leaking NaN into every fade evaluation.
+            const double sanitized = std::isfinite(*fadeFraction) ? *fadeFraction : 0.35;
+            lodBands_.fadeFraction = static_cast<float>(std::clamp(sanitized, 0.01, 1.0));
         }
 
         // Layer budgets per LOD band: five values, most detailed first.
@@ -207,7 +211,11 @@ private:
         {
             for (std::size_t band = 0; band < LodBands::bandCount; ++band)
             {
-                const long long value = static_cast<long long>(layerCounts[band]);
+                // Casting a non-finite or out-of-range double to a signed
+                // integer is undefined behaviour; every sibling config path
+                // checks isfinite first, and this one must too.
+                const double raw = layerCounts[band];
+                const long long value = !std::isfinite(raw) ? -1 : static_cast<long long>(raw);
                 if (value < 0 || value > 64)
                 {
                     std::fprintf(stderr,
@@ -226,11 +234,19 @@ private:
             context.configurationFloatingArrayInSection("physics_fur", "lod_screen_sizes");
         if (thresholds.size() >= 4)
         {
-            float previous = thresholds[0] + 1.0f;
+            // Start above every representable threshold so band 0 only has
+            // to satisfy the finite/positive bound; computing the seed from
+            // the raw config value could itself overflow the float range.
+            float previous = std::numeric_limits<float>::max();
             for (std::size_t band = 0; band < 4; ++band)
             {
                 double value = thresholds[band];
-                if (!std::isfinite(value) || value <= 0.0 || value >= previous)
+                // A finite double beyond the float range would make both the
+                // `previous` comparison and the final cast undefined
+                // behaviour; the isfinite bound below keeps every accepted
+                // value inside the float range (the default table is ~0.03
+                // .. 0.35, so the bound is far above any sane threshold).
+                if (!std::isfinite(value) || value <= 0.0 || value >= 1.0e30 || value >= previous)
                 {
                     std::fprintf(stderr,
                         "physics_fur module: [physics_fur] lod_screen_sizes band %zu (%g) must be finite, > 0 and descending; "
@@ -324,6 +340,22 @@ private:
                 "physics_fur module: fur texture buffer too small (%zu < %zu bytes)\n",
                 outCapacityBytes,
                 requiredBytes);
+            return false;
+        }
+        // FurParameters is plain consumer data; the texture generator's
+        // internal contract says "pre-validated by the caller" but the
+        // capability surface is public, so the entry point validates what
+        // the math needs: every parameter finite (a NaN patternScale or
+        // colorVariation would reach float->int casts in the lattice walk -
+        // undefined behaviour - instead of degrading to a flat texture).
+        const FurParameters &parameters = request->parameters;
+        if (!std::isfinite(parameters.strandLength) || !std::isfinite(parameters.density)
+            || !std::isfinite(parameters.lengthVariance) || !std::isfinite(parameters.colorVariation)
+            || !std::isfinite(parameters.patternScale) || !std::isfinite(parameters.gravityStrength)
+            || !std::isfinite(parameters.densityBoost))
+        {
+            std::fprintf(stderr,
+                "physics_fur module: generateFurTexture called with non-finite parameters\n");
             return false;
         }
         generateFurTexturePixels(request->parameters, width, height, outPixelsRgba);

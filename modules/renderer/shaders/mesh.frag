@@ -266,6 +266,14 @@ vec3 giLevelIrradiance(uint levelOffset, vec3 levelAnchor, vec3 levelDims, float
     const vec3 cell       = (position - levelAnchor) / levelSpacing;
     const ivec3 base      = clamp(ivec3(floor(cell)), ivec3(0.0), ivec3(levelDims) - ivec3(2.0));
     const vec3 fraction   = clamp(cell - vec3(base), vec3(0.0), vec3(1.0));
+    // Tangent-plane anti-leak weight (the CPU twin's
+    // probeTangentPlaneAlignmentFactor, in its factored form): the base
+    // alignment measured against the cell's base corner plus the corner's
+    // unit offsets dotted with the normal, so a probe on the far side of
+    // the shaded point's tangent plane drops out instead of lighting the
+    // surface through walls. Probes lying in the plane keep half weight.
+    const float inverseSpacing = 1.0 / max(levelSpacing, 1.0e-5);
+    const float baseAlignment  = dot(normal, levelAnchor + vec3(base) * levelSpacing - position) * inverseSpacing;
     vec3 irradianceSum    = vec3(0.0);
     float weightSum       = 0.0;
     for (int cornerZ = 0; cornerZ < 2; ++cornerZ)
@@ -284,8 +292,26 @@ vec3 giLevelIrradiance(uint levelOffset, vec3 levelAnchor, vec3 levelDims, float
                 const float latticeWeight = (cornerX != 0 ? fraction.x : 1.0 - fraction.x)
                                           * (cornerY != 0 ? fraction.y : 1.0 - fraction.y)
                                           * (cornerZ != 0 ? fraction.z : 1.0 - fraction.z);
-                const float weight = latticeWeight * probeRecords[recordBase].w;
+                float weight = latticeWeight * probeRecords[recordBase].w;
                 if (weight <= 0.0)
+                {
+                    continue;
+                }
+                float alignment = baseAlignment;
+                if (cornerX != 0)
+                {
+                    alignment += normal.x;
+                }
+                if (cornerY != 0)
+                {
+                    alignment += normal.y;
+                }
+                if (cornerZ != 0)
+                {
+                    alignment += normal.z;
+                }
+                weight *= clamp(alignment * 0.5 + 0.5, 0.0, 1.0);
+                if (weight <= 1.0e-8)
                 {
                     continue;
                 }

@@ -62,14 +62,11 @@ ENGINE_RASTERIZER_INLINE void tentFoldRowWide(const std::uint16_t *sums, std::ui
     // the first block starts at texel 1, so the west load reads texel 0, and
     // the last covered texel keeps its east neighbor inside the row.
     const __m512i two = _mm512_set1_epi16(2);
-    // Blocks of 8 texels from texel 1; the last block must leave its east
-    // neighbor (texel t+8) existing: t+8 < columns => t <= columns-9.
-    for (std::uint32_t t = 1u; t + 8u <= columns - 1u + 1u && t + 8u < columns + 1u; t += 8u)
+    // Blocks of 8 texels from texel 1; the last covered texel t+7 needs its
+    // east neighbor t+8 to exist inside the row: t+8 <= columns-1 (exactly
+    // the bound the scalar coverage walk below applies).
+    for (std::uint32_t t = 1u; t + 8u <= columns - 1u; t += 8u)
     {
-        if (t + 8u >= columns + 1u)
-        {
-            break; // the east neighbor of texel t+7 would be t+8 >= columns
-        }
         const std::size_t channelBase = static_cast<std::size_t>(t) * 4u;
         const __m512i center = _mm512_loadu_si512(
             reinterpret_cast<const __m512i *>(sums + channelBase));
@@ -94,12 +91,11 @@ ENGINE_RASTERIZER_INLINE void tentFoldRowWide(const std::uint16_t *sums, std::ui
                 + 2u * sums[here * 4u + channel] + sums[east * 4u + channel]);
         }
     };
-    // Cover: texel 0, then texels from the end of the last full block.
-    // The vector loop covers texels [1, 1+8k) while (t+8) <= columns-... let
-    // us compute exactly: blocks at t=1,9,17,... while t+8 < columns
-    // (east neighbor exists) AND t+8 <= columns (block fits). The loop
-    // condition `t + 8u < columns + 1u && t + 8u < columns` = t+8 <= columns-1:
-    // covers texels t..t+7 with east neighbor t+8 <= columns-1. Correct.
+    // Cover: texel 0, then texels from the end of the last full block. The
+    // vector loop covers texels [1, 1+8k) for every block whose east
+    // neighbor t+8 <= columns-1 exists - the same bound this walk applies -
+    // so the scalar tail picks up exactly the texels no block covered
+    // (including the last texel, whose east neighbor clamps to itself).
     scalarFold(0u);
     std::uint32_t covered = 1u; // texel 0 done; blocks cover [1, lastCovered)
     std::uint32_t t = 1u;
@@ -155,7 +151,15 @@ ENGINE_RASTERIZER_INLINE __m512 cameraResponseWide(const float *decodeTable, con
 {
     const __m512 decoded = decodeBytesWide(decodeTable, bytes);
     const __m512 contrasted = _mm512_add_ps(_mm512_mul_ps(decoded, slope), intercept);
-    const __m512 gained = _mm512_mul_ps(contrasted, gain);
+    // The scalar path clamps between the contrast pivot and the
+    // vignette/grain gain (processScalarCameraPixel's glm::clamp): without
+    // it a contrasted value above 1 keeps scaling past the clamp the scalar
+    // sequence applies first, and the wide lanes disagree with the scalar
+    // tail of the same row. With contrast == 1 (slope 1, intercept 0) the
+    // clamp is a no-op, exactly like the scalar path's conditional clamp.
+    const __m512 contrastClamped = _mm512_min_ps(_mm512_max_ps(contrasted, _mm512_setzero_ps()),
+        _mm512_set1_ps(1.0f));
+    const __m512 gained = _mm512_mul_ps(contrastClamped, gain);
     const __m512 clamped = _mm512_min_ps(_mm512_max_ps(gained, _mm512_setzero_ps()),
         _mm512_set1_ps(1.0f));
     return encodeLinearWide(encodeTable, _mm512_add_ps(clamped, dither));

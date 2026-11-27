@@ -864,7 +864,14 @@ bool probeFootprint(const RfPipelineState &state, const RfProbeLevel &level, con
     CachedFootprint &cache, float weights[8], float &weightSum)
 {
     const RfProbeGrid &grid = state.probeGrid;
-    const glm::vec3 cell     = (position - level.anchor) / level.spacing;
+    // The scaled position is clamped into int32 range before the cell
+    // conversion: the float-to-int conversion of an out-of-range value is
+    // undefined, and the ivec3 clamp below only runs after it. A position
+    // far outside the level still resolves to the border cell (the
+    // radiance cache applies the same rule to its lattice walk).
+    const glm::vec3 scaledCell = glm::clamp((position - level.anchor) / level.spacing,
+        glm::vec3(-1.0e9f), glm::vec3(1.0e9f));
+    const glm::vec3 cell       = scaledCell;
     const glm::ivec3 base    = glm::clamp(glm::ivec3(glm::floor(cell)), glm::ivec3(0), level.dims - glm::ivec3(2));
     const glm::vec3 fraction = glm::clamp(cell - glm::vec3(base), 0.0f, 1.0f);
     if (!cache.filled || cache.version != grid.version || cache.base != base

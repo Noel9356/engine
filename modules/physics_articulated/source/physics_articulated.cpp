@@ -168,13 +168,29 @@ private:
         }
 
         // Parent indices must reference earlier links (trees, assembly order
-        // root first) and no link may parent itself.
+        // root first) and no link may parent itself. The same pass validates
+        // the per-link payloads the contract assigns to THIS module ("null
+        // pointers, non-finite values, cyclic or out-of-range parents"):
+        // the material (a non-finite friction would reach the rigid solver's
+        // mixing math), the hinge axis (rigid joint creation only validates
+        // it for hinge kinds - a ball-socket link's axis would otherwise be
+        // stored raw and echoed into the character drive math), the relative
+        // rotation (a zero quaternion silently loses the composed pose), and
+        // the joint anchors (they place the joint bodies directly).
         for (std::uint32_t index = 0; index < description->linkCount; ++index)
         {
             const LinkDescription &link = description->links[index];
             if (link.parentIndex < -1 || link.parentIndex >= static_cast<std::int32_t>(description->linkCount)
                 || link.parentIndex == static_cast<std::int32_t>(index)
-                || (link.parentIndex >= 0 && static_cast<std::uint32_t>(link.parentIndex) >= index))
+                || (link.parentIndex >= 0 && static_cast<std::uint32_t>(link.parentIndex) >= index)
+                || !std::isfinite(link.material.friction) || !std::isfinite(link.material.restitution)
+                || !std::isfinite(link.material.rollingResistance)
+                || !math::isFinite(link.hingeAxisLocalParent)
+                || math::lengthSquared(link.hingeAxisLocalParent) < 1.0e-12
+                || !math::isFinite(link.relativeTransform.rotation)
+                || math::dot(link.relativeTransform.rotation, link.relativeTransform.rotation) < 1.0e-12
+                || !math::isFinite(link.relativeTransform.position)
+                || !math::isFinite(link.jointAnchorLocalChild) || !math::isFinite(link.jointAnchorLocalParent))
             {
                 setError(error, ArticulatedError::InvalidDescription);
                 return invalidFigure;
@@ -216,7 +232,10 @@ private:
             LinkRecord            &record = figure.links[index];
             record.parentIndex            = link.parentIndex;
             record.jointToParent          = link.jointToParent;
-            record.hingeAxisLocalParent   = link.hingeAxisLocalParent;
+            // The stored axis is the NORMALIZED input: consumers compose it
+            // into rotation quaternions and project errors onto it, both of
+            // which assume a unit axis.
+            record.hingeAxisLocalParent   = math::normalized(link.hingeAxisLocalParent);
             record.drive                  = JointDrive{};
 
             engine::physics_rigid::BodyDescription bodyDescription;
@@ -242,7 +261,14 @@ private:
                 bodyDescription.transform.position
                     = parentState.transform.position
                     + math::rotate(parentState.transform.rotation, link.relativeTransform.position);
-                bodyDescription.transform.rotation = parentState.transform.rotation * link.relativeTransform.rotation;
+                // Normalize the relative rotation BEFORE composing: the
+                // product with a zero quaternion would be zero, the rigid
+                // body creation would then normalize that to identity, and
+                // the child would silently lose its parent-relative pose
+                // while the assembly reference below captured a frame that
+                // does not match the placed body.
+                bodyDescription.transform.rotation
+                    = parentState.transform.rotation * math::normalize(link.relativeTransform.rotation);
                 // Assembly reference (relative rotation parent^-1 * link):
                 // the child body takes exactly this composed transform, so
                 // the reference derives here without extra body-state round
@@ -564,11 +590,9 @@ private:
             // Twist axis: the joint's own axisLocalA for hinges and ball
             // sockets alike - the rigid module's cone/twist limits measure
             // about the same axis, so the drive and the reported state stay
-            // consistent with what the constraint enforces.
-            const engine::physics_rigid::Vec3 axisLocal = math::normalized(
-                description.kind == engine::physics_rigid::JointKind::Hinge
-                    ? description.axisLocalA
-                    : description.axisLocalA);
+            // consistent with what the constraint enforces. (The stored axis
+            // is the normalized creation input for every joint kind.)
+            const engine::physics_rigid::Vec3 axisLocal = math::normalized(description.axisLocalA);
             const double assemblyTwist = math::twistAngleRadians(link.referenceRelativeRotation, axisLocal);
             const double currentTwist  = math::twistAngleRadians(relativeRotation, axisLocal);
             const double angle         = currentTwist - assemblyTwist;
@@ -620,7 +644,11 @@ private:
         const engine::physics_rigid::Quaternion assembly = link.referenceRelativeRotation;
         if (description.kind == engine::physics_rigid::JointKind::Hinge)
         {
-            const engine::physics_rigid::Vec3 axisLocal = description.axisLocalA;
+            // The hinge branch measures with the same normalized axis the
+            // drives use (the ball-socket branch below already did); the
+            // raw echoed axis can be non-unit, which skews the reported
+            // angle away from what the drive actually targets.
+            const engine::physics_rigid::Vec3 axisLocal = math::normalized(description.axisLocalA);
             outState->angleRadians
                 = math::twistAngleRadians(relativeRotation, axisLocal) - math::twistAngleRadians(assembly, axisLocal);
             outState->twistRadians = outState->angleRadians;

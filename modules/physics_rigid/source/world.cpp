@@ -195,6 +195,16 @@ bool validateBodyDescription(const World &world, const SimulationSettings &setti
         return setFailure(PhysicsError::InvalidDescription);
     }
     body.kind                 = description.kind;
+    // Material finiteness first: std::clamp keeps NaN (both comparisons are
+    // false), so a non-finite material reaching the clamp would poison every
+    // contact this body takes part in (the solver mixes friction with a
+    // square root). The setBodyMaterial entry point checks finiteness; the
+    // creation path must match it.
+    if (!std::isfinite(description.material.friction) || !std::isfinite(description.material.restitution)
+        || !std::isfinite(description.material.rollingResistance))
+    {
+        return setFailure(PhysicsError::InvalidDescription);
+    }
     body.material             = description.material;
     body.material.friction    = std::clamp(body.material.friction, 0.0, 4.0);
     body.material.restitution = std::clamp(body.material.restitution, 0.0, 1.0);
@@ -266,7 +276,10 @@ bool validateBodyDescription(const World &world, const SimulationSettings &setti
 }
 
 // One integration pass at the given (already validated) delta: the whole
-// pipeline without statistics or substep bookkeeping.
+// pipeline without statistics or substep bookkeeping. Divergence (non-finite
+// state) only reports failure here; the snapshot rollback belongs to the
+// caller (stepWorld), which captures once for the whole step so a failed
+// substep cannot leave earlier substeps committed.
 bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
 {
     const SimulationSettings &settings = world.settings;
@@ -288,8 +301,6 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
                 settings.lod.thresholds, body.importance, body.lodBand);
         }
     }
-
-    scratch.snapshot.capture(world);
 
     // Force and gravity integration for awake dynamic bodies.
     for (Body &body : world.bodies)
@@ -367,6 +378,12 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
         persisted.ageSteps       = 0;
         persisted.pointCount     = 0;
         const double matchRadius = std::max(settings.contactSlop * 4.0, 0.02);
+        // The match test compares squared distances, so the threshold is
+        // squared as well: comparing the squared distance against the linear
+        // radius would match anchors up to sqrt(matchRadius) meters apart
+        // (sqrt(0.02) ~ 0.14 m at the defaults) and leak one contact point's
+        // impulses into a different point.
+        const double matchRadiusSquared = matchRadius * matchRadius;
         for (std::uint32_t freshIndex = 0; freshIndex < fresh.pointCount; ++freshIndex)
         {
             PersistedContactPoint target;
@@ -375,7 +392,7 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
             target.normalImpulse      = 0.0;
             target.tangentImpulse1    = 0.0;
             target.tangentImpulse2    = 0.0;
-            double       bestDistance = matchRadius;
+            double       bestDistance = matchRadiusSquared;
             std::int32_t bestCarried  = -1;
             for (std::uint32_t candidateIndex = 0; candidateIndex < carriedCount; ++candidateIndex)
             {
@@ -699,7 +716,8 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
         }
     }
 
-    // Non-finite guard: restore the pre-step snapshot on divergence.
+    // Non-finite guard: divergence fails this substep (and thereby the whole
+    // step, which stepWorld rolls back with its pre-step snapshot).
     bool finite = true;
     for (const Body &body : world.bodies)
     {
@@ -714,7 +732,6 @@ bool stepPipeline(World &world, double fixedDeltaSeconds, StepScratch &scratch)
     }
     if (!finite)
     {
-        scratch.snapshot.restore(world);
         return false;
     }
 
@@ -854,10 +871,17 @@ bool stepWorld(World &world, double fixedDeltaSeconds, StepScratch &scratch)
         substeps              = static_cast<std::uint32_t>(std::max(bounded, 1.0));
     }
     const double substepDelta = fixedDeltaSeconds / static_cast<double>(substeps);
+    // Whole-step atomicity: the snapshot is captured once before the first
+    // substep and restored if ANY substep fails, so a diverging substep
+    // cannot leave its predecessors' integration committed. A per-substep
+    // capture would only roll back the failing substep, leaving the world
+    // half-stepped despite the failed return.
+    scratch.snapshot.capture(world);
     for (std::uint32_t substep = 0; substep < substeps; ++substep)
     {
         if (!stepPipeline(world, substepDelta, scratch))
         {
+            scratch.snapshot.restore(world);
             return false;
         }
     }
@@ -1280,11 +1304,16 @@ bool rayCastWorldIgnoring(const World &world, const math::Vec3 &origin, const ma
             }
             else if (body.shape.kind == ShapeKind::Cylinder)
             {
-                const math::Vec3 axis = math::rotate(body.transform.rotation, math::Vec3{0.0, body.shape.cylinderHalfHeight, 0.0});
-                const double     projection = std::clamp(math::dot(bestHit.point - body.transform.position, axis),
+                // The projection math needs the UNIT axis: the rotated local
+                // +Y half-height vector has length h, so its raw dot products
+                // scale by h, the clamp bounds stop measuring meters, and the
+                // cap-normal fallback would return a length-h vector.
+                const math::Vec3 axis
+                    = math::normalized(math::rotate(body.transform.rotation, math::Vec3{0.0, body.shape.cylinderHalfHeight, 0.0}));
+                const double projection = std::clamp(math::dot(bestHit.point - body.transform.position, axis),
                     -body.shape.cylinderHalfHeight,
                     body.shape.cylinderHalfHeight);
-                math::Vec3 axisPoint   = body.transform.position + axis * (projection / body.shape.cylinderHalfHeight);
+                math::Vec3 axisPoint   = body.transform.position + axis * projection;
                 math::Vec3 radial      = bestHit.point - axisPoint;
                 const double radialLength = math::length(radial);
                 candidate = radialLength > kEpsilon && radialLength > body.shape.cylinderRadius * 0.5

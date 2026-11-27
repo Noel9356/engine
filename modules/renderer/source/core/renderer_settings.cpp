@@ -77,6 +77,39 @@ std::int64_t readClampedInteger(
     return std::clamp<std::int64_t>(*value, lowest, highest);
 }
 
+// The floating twin of readClampedInteger. std::clamp passes NaN through
+// (both comparisons fail), so a non-finite value is rejected outright - a
+// NaN reaching the shading or presentation math corrupts whole frames -
+// and out-of-range finite values clamp with the same warning the integer
+// path prints.
+double readClampedFloating(
+    ParticipantContext &context, const char *key, double fallback, double lowest, double highest)
+{
+    const std::optional<double> value = context.configurationFloatingInSection("renderer", key);
+    if (!value.has_value())
+    {
+        return fallback;
+    }
+    if (!std::isfinite(*value))
+    {
+        std::fprintf(stderr,
+            "renderer module: ignoring non-finite [renderer] %s; keeping %g\n",
+            key,
+            fallback);
+        return fallback;
+    }
+    if (*value < lowest || *value > highest)
+    {
+        std::fprintf(stderr,
+            "renderer module: clamping [renderer] %s %g to range %g..%g\n",
+            key,
+            *value,
+            lowest,
+            highest);
+    }
+    return std::clamp(*value, lowest, highest);
+}
+
 // The nearest power of two inside 16..256 (the tile grid must stay aligned
 // with the framebuffer); exact powers of two and range ends stay as they
 // are, everything else rounds to the closer neighbour (ties round up).
@@ -205,10 +238,10 @@ void overlayConfiguredSettings(ParticipantContext &context, RendererSettings &se
         = context.configurationBooleanInSection("renderer", "gather_indirect_lighting").value_or(true);
     settings.bloomEnabled
         = context.configurationBooleanInSection("renderer", "bloom").value_or(true);
-    settings.bloomStrength
-        = context.configurationFloatingInSection("renderer", "bloom_strength").value_or(0.35);
-    settings.bloomThreshold
-        = context.configurationFloatingInSection("renderer", "bloom_threshold").value_or(0.8);
+    settings.bloomStrength = static_cast<float>(
+        readClampedFloating(context, "bloom_strength", 0.35, 0.0, 8.0));
+    settings.bloomThreshold = static_cast<float>(
+        readClampedFloating(context, "bloom_threshold", 0.8, 0.0, 16.0));
     // Sun shadow mapping (headless backend): orthographic sun-aligned depth
     // map over the frame's opaque lit draws; the percentage-closer filter
     // width and map resolution are the quality/cost knobs, and a static
@@ -217,34 +250,34 @@ void overlayConfiguredSettings(ParticipantContext &context, RendererSettings &se
         = context.configurationBooleanInSection("renderer", "sun_shadows").value_or(true);
     settings.shadowMapResolution = static_cast<std::uint32_t>(readClampedInteger(
         context, "shadow_map_resolution", settings.shadowMapResolution, 64, 8192));
-    settings.shadowFilterRadiusTexels = std::clamp(
-        context.configurationFloatingInSection("renderer", "shadow_filter_radius").value_or(1.5), 0.0, 16.0);
+    settings.shadowFilterRadiusTexels = static_cast<float>(
+        readClampedFloating(context, "shadow_filter_radius", 1.5, 0.0, 16.0));
     // Zenith sky-visibility shadows (headless backend): the ambient term
     // grounded by what blocks the sky above each point.
     settings.skyShadowsEnabled
         = context.configurationBooleanInSection("renderer", "sky_shadows").value_or(true);
     // Camera response presentation pass (headless backend).
-    settings.cameraContrast = std::clamp(
-        context.configurationFloatingInSection("renderer", "contrast").value_or(1.0), 0.05, 8.0);
-    settings.cameraVignette = std::clamp(
-        context.configurationFloatingInSection("renderer", "vignette").value_or(0.18), 0.0, 1.0);
-    settings.cameraGrain = std::clamp(
-        context.configurationFloatingInSection("renderer", "grain").value_or(0.01), 0.0, 0.2);
+    settings.cameraContrast = static_cast<float>(
+        readClampedFloating(context, "contrast", 1.0, 0.05, 8.0));
+    settings.cameraVignette = static_cast<float>(
+        readClampedFloating(context, "vignette", 0.18, 0.0, 1.0));
+    settings.cameraGrain = static_cast<float>(
+        readClampedFloating(context, "grain", 0.01, 0.0, 0.2));
     // Film antialiasing presentation pass (headless backend).
     settings.filmAntialiasingEnabled
         = context.configurationBooleanInSection("renderer", "film_aa").value_or(false);
     // The cross-edge stage strength of that pass (0 keeps the along-edge
     // blend only; above 1 keeps softening past the half-texel the default
     // targets).
-    settings.filmAntialiasingStrength = std::clamp(
-        context.configurationFloatingInSection("renderer", "film_aa_strength").value_or(1.0), 0.0, 2.0);
+    settings.filmAntialiasingStrength = static_cast<float>(
+        readClampedFloating(context, "film_aa_strength", 1.0, 0.0, 2.0));
     // Supersample resolve filter: the bilinear tent kernel over the sample
     // blocks instead of the plain box average (see resolveTentEnabled).
     settings.resolveTentEnabled
         = context.configurationBooleanInSection("renderer", "headless_resolve_tent").value_or(true);
     // Gather field contact-occlusion multiplier.
-    settings.gatherOcclusionStrength = std::clamp(
-        context.configurationFloatingInSection("renderer", "gather_occlusion_strength").value_or(1.0), 0.0, 4.0);
+    settings.gatherOcclusionStrength = static_cast<float>(
+        readClampedFloating(context, "gather_occlusion_strength", 1.0, 0.0, 4.0));
     settings.furEnabled = context.configurationBooleanInSection("renderer", "fur_enabled").value_or(true);
     settings.furMaximumLayers
         = static_cast<std::uint32_t>(readClampedInteger(context, "fur_max_layers", settings.furMaximumLayers, 0, 64));
@@ -392,14 +425,11 @@ void overlayConfiguredSettings(ParticipantContext &context, RendererSettings &se
         = context.configurationFloatingInSection("renderer", "headless_band_split_min_screen_fraction");
         fraction.has_value())
     {
-        if (!std::isfinite(*fraction) || *fraction < 0.0 || *fraction > 1.0)
-        {
-            std::fprintf(stderr,
-                "renderer module: clamping [renderer] headless_band_split_min_screen_fraction %g to range 0..1\n",
-                *fraction);
-        }
-        settings.headlessBandSplitMinimumScreenFraction
-            = static_cast<float>(std::clamp(*fraction, 0.0, 1.0));
+        settings.headlessBandSplitMinimumScreenFraction = static_cast<float>(readClampedFloating(context,
+            "headless_band_split_min_screen_fraction",
+            settings.headlessBandSplitMinimumScreenFraction,
+            0.0,
+            1.0));
     }
 
     settings.drawSortMinimumCommands = static_cast<std::uint32_t>(
@@ -425,13 +455,8 @@ void overlayConfiguredSettings(ParticipantContext &context, RendererSettings &se
     if (const auto anisotropy = context.configurationFloatingInSection("renderer", "anisotropy_level");
         anisotropy.has_value())
     {
-        if (*anisotropy < 1.0 || *anisotropy > 16.0)
-        {
-            std::fprintf(stderr,
-                "renderer module: clamping [renderer] anisotropy_level %g to range 1..16\n",
-                *anisotropy);
-        }
-        settings.anisotropyLevel = static_cast<float>(std::clamp(*anisotropy, 1.0, 16.0));
+        settings.anisotropyLevel = static_cast<float>(
+            readClampedFloating(context, "anisotropy_level", settings.anisotropyLevel, 1.0, 16.0));
     }
     if (const auto sortMode = context.configurationStringInSection("renderer", "draw_sort_mode"))
     {

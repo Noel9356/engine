@@ -54,11 +54,22 @@ std::uint32_t resolveFluidCollisions(FluidRecord &fluid, engine::physics_rigid::
         return 0u;
     }
     fluid.collisionResults.resize(fluid.collisionQueries.size());
-    rigid->collideSpheres(rigid->self,
+    const std::uint32_t resolvedCollisions = rigid->collideSpheres(rigid->self,
         fluid.world,
         fluid.collisionQueries.data(),
         static_cast<std::uint32_t>(fluid.collisionQueries.size()),
         fluid.collisionResults.data());
+    if (resolvedCollisions < fluid.collisionQueries.size())
+    {
+        // The provider wrote nothing (the rigid world is gone). resize()
+        // keeps the previous substep's contents, and re-reading stale hits
+        // would drift positions by their old depths every substep, so every
+        // entry is neutralized before the walk.
+        for (engine::physics_rigid::SphereOverlapResult &result : fluid.collisionResults)
+        {
+            result = engine::physics_rigid::SphereOverlapResult{};
+        }
+    }
     std::uint32_t hits = 0u;
     for (std::size_t particle = 0; particle < particleCount; ++particle)
     {
@@ -294,10 +305,17 @@ void resolveBounds(FluidRecord &fluid, const FluidSettings &settings)
 } // namespace
 
 bool stepFluid(FluidRecord &fluid, const FluidSettings &settings,
-    engine::physics_rigid::PhysicsRigidCapability *rigid, double fixedDeltaSeconds, std::uint32_t substeps)
+    engine::physics_rigid::PhysicsRigidCapability *rigid, double fixedDeltaSeconds, std::uint32_t substeps,
+    std::uint32_t interval)
 {
     const auto stepStart = std::chrono::steady_clock::now();
-    if (!(fixedDeltaSeconds > 0.0) || fixedDeltaSeconds > 0.1 || !std::isfinite(fixedDeltaSeconds))
+    // The sanity cap applies PER MERGED FIXED STEP: a simulation-LOD due
+    // step legitimately integrates `interval` accumulated fixed deltas in
+    // one pass, so the accepted delta scales with the merge count (capping
+    // the merged delta at the single-step bound would freeze every
+    // Animation-band fluid at the default 60 Hz).
+    const double maximumDelta = 0.1 * static_cast<double>(interval > 0u ? interval : 1u);
+    if (!(fixedDeltaSeconds > 0.0) || fixedDeltaSeconds > maximumDelta || !std::isfinite(fixedDeltaSeconds))
     {
         return false;
     }

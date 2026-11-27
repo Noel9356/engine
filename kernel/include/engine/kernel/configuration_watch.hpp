@@ -137,12 +137,23 @@ inline ConfigurationWatchHub::~ConfigurationWatchHub()
 
 inline ConfigurationWatchHub::ConfigurationWatchHub(ConfigurationWatchHub &&other) noexcept
     : bus(other.bus),
-      reloadSubscription(std::move(other.reloadSubscription)),
       watches(std::move(other.watches)),
       nextWatchId(other.nextWatchId)
 {
+    // The moved-from hub's subscription still dispatches into it (the bus
+    // handler captured &other), so it must not survive the move: the token
+    // is released here and a fresh subscription is created for this object,
+    // keeping reload events flowing into the moved-to hub.
     other.bus         = nullptr;
     other.nextWatchId = 1;
+    other.reloadSubscription.release();
+    if (bus != nullptr)
+    {
+        reloadSubscription = EventSubscription(bus,
+            typeid(ConfigurationReloadedEvent),
+            bus->channel<ConfigurationReloadedEvent>()
+                .subscribe<ConfigurationWatchHub, &ConfigurationWatchHub::handleReloaded>(this));
+    }
 }
 
 inline ConfigurationWatchHub &ConfigurationWatchHub::operator=(ConfigurationWatchHub &&other) noexcept
@@ -152,11 +163,20 @@ inline ConfigurationWatchHub &ConfigurationWatchHub::operator=(ConfigurationWatc
         watches.clear();
         reloadSubscription.release();
         bus                = other.bus;
-        reloadSubscription = std::move(other.reloadSubscription);
         watches            = std::move(other.watches);
         nextWatchId        = other.nextWatchId;
         other.bus          = nullptr;
         other.nextWatchId  = 1;
+        // Same re-subscription as the move constructor: the inherited token
+        // points the bus at the moved-from object.
+        other.reloadSubscription.release();
+        if (bus != nullptr)
+        {
+            reloadSubscription = EventSubscription(bus,
+                typeid(ConfigurationReloadedEvent),
+                bus->channel<ConfigurationReloadedEvent>()
+                    .subscribe<ConfigurationWatchHub, &ConfigurationWatchHub::handleReloaded>(this));
+        }
     }
     return *this;
 }
@@ -211,13 +231,16 @@ inline void ConfigurationWatchHub::handleReloaded(const ConfigurationReloadedEve
         {
             continue;
         }
-        // The key is copied out before the callback runs: the callback may
-        // register or release watches, and a push_back reallocation would
-        // leave the reference into the watches vector dangling.
-        const std::string key = stillHeld->key;
+        // Both the key and the callable are copied out before the callback
+        // runs: the callback may release watches (including its own, which
+        // would destroy the executing std::function) or register new ones
+        // (a push_back reallocation would move every entry - including the
+        // closure still on the stack - out from under the call).
+        const std::string                    key      = stillHeld->key;
+        std::function<void(const std::string &)> callback = stillHeld->callback;
         if (std::find(event.changedKeys.begin(), event.changedKeys.end(), key) != event.changedKeys.end())
         {
-            stillHeld->callback(key);
+            callback(key);
         }
     }
 }
