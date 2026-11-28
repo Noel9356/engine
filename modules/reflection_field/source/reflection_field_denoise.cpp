@@ -248,6 +248,53 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
                 for (std::uint32_t x = 0; x < state.fieldWidth; ++x)
                 {
                     const std::size_t index = y * state.fieldWidth + x;
+                    // Governor interleave (update_budget_milliseconds): a
+                    // texel whose trace turn belonged to another frame this
+                    // frame carries its REPROJECTED history unchanged - no
+                    // neighborhood clamp, no blend with a zero "current"
+                    // (the trace pass skipped it, so scratchSpatial holds
+                    // nothing meaningful for it). The phase rotation
+                    // guarantees a fresh trace within `stride` frames; a
+                    // disoccluded (history-rejecting) reused texel reads
+                    // black for those frames only.
+                    if (state.fieldReused[index] != 0u)
+                    {
+                        glm::vec3 carried(0.0f);
+                        if (hasHistory)
+                        {
+                            const glm::vec4 clip
+                                = state.historyViewProjection * glm::vec4(state.gbufferPosition[index], 1.0f);
+                            if (clip.w > 0.05f)
+                            {
+                                const float u
+                                    = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(state.fieldWidth) - 0.5f;
+                                const float v
+                                    = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(state.fieldHeight) - 0.5f;
+                                if (u >= 0.0f && v >= 0.0f && u <= static_cast<float>(state.fieldWidth) - 1.0f
+                                    && v <= static_cast<float>(state.fieldHeight) - 1.0f)
+                                {
+                                    const std::uint32_t hx = std::min(
+                                        static_cast<std::uint32_t>(u + 0.5f), state.fieldWidth - 1u);
+                                    const std::uint32_t hy = std::min(
+                                        static_cast<std::uint32_t>(v + 0.5f), state.fieldHeight - 1u);
+                                    const std::size_t hIndex
+                                        = static_cast<std::size_t>(hy) * state.fieldWidth + hx;
+                                    const float currentDepth = state.gbufferDepth[index];
+                                    const float historyDepth = state.historyDepth[hIndex];
+                                    if (!rfIsBackground(historyDepth)
+                                        && std::fabs(historyDepth - currentDepth)
+                                            < 0.1f * std::max(currentDepth, 1.0f))
+                                    {
+                                        carried  = state.historyField[hIndex];
+                                        state.historyLength[index] += 1u;
+                                    }
+                                }
+                            }
+                        }
+                        state.fieldFiltered[index]      = carried;
+                        state.scratchDisoccluded[index] = carried.x + carried.y + carried.z > 0.0f ? 0u : 1u;
+                        continue;
+                    }
                     const glm::vec3 current = state.scratchSpatial[index];
                     if (state.fieldValid[index] == 0u)
                     {
@@ -426,7 +473,20 @@ void rfTemporalAccumulate(RfPipelineState &state, TaskScheduler *scheduler)
                     const glm::vec3 blendedSample = count > 0.0f
                         ? glm::clamp(current, boundLow, boundHigh)
                         : current;
-                    const float historyWeight = std::min(strength,
+                    // DYNAMIC surfaces (the animated water): the texel's
+                    // content changes with the surface itself, so a long
+                    // running mean is a stale average of past wave phases -
+                    // the close-up water reads as lagged mush under fresh
+                    // jitter. The cap keeps roughly a two-frame mean (enough
+                    // to average the lobe jitter, fresh enough to follow the
+                    // wave phase). The trace pass gives these texels a fresh
+                    // sample every frame (the stride exemption), so the cap
+                    // never blends against a stale carry.
+                    const bool texelDynamic = state.gbufferSurface[index] != noSurface
+                        && static_cast<std::size_t>(state.gbufferSurface[index]) < state.surfaces.size()
+                        && state.surfaces[state.gbufferSurface[index]].dynamic;
+                    const float texelStrength = texelDynamic ? std::min(strength, 0.55f) : strength;
+                    const float historyWeight = std::min(texelStrength,
                         static_cast<float>(historyAge) / (static_cast<float>(historyAge) + 1.0f));
                     state.fieldFiltered[index] = glm::mix(blendedSample, clamped, historyWeight);
                     state.historyLength[index] = std::min(historyAge + 1u, historyLengthCap);

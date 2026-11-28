@@ -82,7 +82,7 @@ lobe_alpha_floor            = 0.02
 # average instead of a stippled one. Lower it toward lobe_alpha_floor for
 # sharper clear-glass refraction at the cost of per-frame grain the temporal
 # accumulation must average out.
-transmission_lobe_alpha_floor = 0.02
+transmission_lobe_alpha_floor = 0.03
 # How many interfaces a ray chain may cross through transparent or
 # translucent surfaces (screen pass-throughs and refracted hops both count).
 # A chain that exhausts the budget is absorbed. Glass panes cost two hops
@@ -100,6 +100,14 @@ max_transmission_segments   = 3
 sun_disc_angular_radius_deg = 2.3
 
 [reflection_field.temporal]
+# Wall-clock budget for the whole evaluate, in milliseconds. 0 traces every
+# field texel every frame (the fixed pipeline); a positive value engages the
+# adaptive stride governor: the measured evaluate cost retunes a trace
+# interleave (the skipped texels carry their reprojected temporal history,
+# and the phase rotation gives every texel a fresh trace within the stride's
+# frame count) so the field refreshes at whatever rate the host can afford
+# inside the budget.
+update_budget_milliseconds = 0.0
 # Cap on the temporal history weight. The blend follows the running-mean
 # ramp N/(N+1) over the texel's accumulated frames and never exceeds this
 # value: 0 replaces every frame, 0.9 keeps an exponential tail of about ten

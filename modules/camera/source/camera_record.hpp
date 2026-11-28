@@ -142,6 +142,7 @@ private:
     float sprintMultiplier_  = builtInSprintMultiplier;
     float maxDeltaSeconds_   = builtInMaximumDeltaSeconds;
     float pitchLimitDegrees_ = builtInPitchLimitDegrees;
+    bool   flyMovementFollowsPitch_ = true;
 
     // Caches rebuilt lazily by ensureMatrices; mutable so the const query
     // entry points can refresh them.

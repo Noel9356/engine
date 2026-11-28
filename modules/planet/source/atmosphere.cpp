@@ -62,14 +62,63 @@ constexpr double kCloudStretchFactor = 0.32;
 constexpr double kCloudSwirlAmplitude = 0.20;
 constexpr double kCloudBillowWavelengthFraction = 0.70;
 
-// Cyclone shear displacement stays storm-local: past a few bank wavelengths
-// the arms stop wrapping the storm and start lacing the whole deck around
-// the globe (samples at the eyewall read banks from the far side of the
-// planet, and the deck photographs as meridian combs radiating from the
-// storm). The clamp caps the wrap at that bound whatever the configured
-// strength; the inward drift derives from the same product, so the cap
-// lands on it too.
-constexpr double kCloudShearMaxWavelengths = 6.0;
+// Cyclone shear displacement stays storm-local: the cap is a couple of core
+// radii (see the shearMeters block - inside the core the Rankine speed makes
+// the shear a rigid rotation of shearMeters/coreMeters radians, so the cap is
+// the wrap budget of the readable spiral). Past it the arms stop wrapping
+// their own storm and start lacing the deck around the globe (samples at the
+// eyewall read banks from the far side of the planet, and the deck
+// photographs as meridian combs radiating from the storm). The clamp caps the
+// wrap at that bound whatever the configured strength; the inward drift
+// derives from the same product, so the cap lands on it too.
+constexpr double kCloudShearMaxCoreRadii = 2.2;
+
+// Cyclone shield shares (see the storm-arms block in sampleCoverage): the
+// DIRECT coverage the storm's own spiral arms carry per unit of its strength,
+// and the eye's subsidence - how hard the dry slot suppresses the ambient
+// deck at the storm's center. A storm reads by CONTRAST with the provinces
+// around it: the arms must sit near-solid and the eye must clear toward real
+// sky whatever the ambient field was doing there, and a threshold-crossing
+// shift cannot guarantee either (inside a saturated province the whole
+// footprint crosses and the arms vanish into the deck; inside a clear one
+// the soft shift reads as faint translucent patches). The shield therefore
+// composites OVER the thresholded field instead of shifting its crossing,
+// while the shear warp keeps the ambient banks woven through the ring's
+// lanes so the storm still reads as the province's own cloud, rearranged.
+constexpr double kCycloneShieldPerStrength = 0.30;
+constexpr double kCycloneEyePerStrength    = 0.35;
+
+// The shield anatomy's ragged deviation from its own ideal spiral (see the
+// storm-arms block): a mature cyclone photographs as a wobbly vortex, not a
+// plot of its own equations - the arms' phase wanders azimuthally, their
+// radius breathes in and out along the wrap, and the shield's solidity knots
+// and thins along the lobes. The two amplitudes below bound that deviation:
+// the azimuthal wobble (radians of phase wander the log-spiral coordinate
+// takes) and the radial breathing (a fraction of the radius the windows
+// evaluate at). Both come from band-limited noise streams at storm-core
+// wavelengths, so the deviation is large-scale and smooth - a ragged but
+// coherent vortex, never uncorrelated roughness.
+constexpr double kCycloneArmWobbleRadians = 0.30;
+constexpr double kCycloneRadialWobble     = 0.16;
+constexpr double kCycloneSolidityFloor    = 0.72;
+
+// How hard the lanes BETWEEN the arms thin the ambient deck (see the
+// storm-arms block): the spiral reads by its crest-and-lane contrast, and a
+// lane that keeps the province's own patchy banks reads as one more gap in
+// the deck instead of the arm structure's shadow. The value stays under 1 so
+// the outermost lane edges keep a wisp of ambient - the shield thins into
+// its province instead of cutting a hard ring around itself.
+constexpr double kCycloneLaneClearance = 0.55;
+
+// Spiral wrap of the storm arms, in radians per e-fold of radius (the k of
+// the log-spiral coordinate cos(m*theta - k*ln(r))): the arms sweep about
+// this many radians each time the radius doubles. The sweep the EYE reads is
+// the one across the ring's SOLID band (between the ramp edges) - a weak
+// twist wraps only the fading fringes and the solid arms read as radial
+// spokes, so the value is sized for roughly 230 degrees of sweep per arm
+// across the band (the one-to-two-turn wrap satellite photography resolves
+// on a mature hurricane).
+constexpr double kCycloneArmTwistRadians = 7.5;
 
 // Convective octave (texture consumers only, see coverageTexel): an
 // inverted-cellular (Worley) pair at METRIC wavelengths
@@ -196,10 +245,14 @@ CloudField::CloudField(const PlanetGenerationParams &params)
     // Deterministic wind frame: a unit flow direction derived from the cloud
     // seed. The base field is sampled in a frame whose axis is compressed
     // along the flow, elongating banks along it; the two transverse axes stay
-    // unscaled. A pure seed function - no state, order independent.
+    // unscaled. A pure seed function - no state, order independent. The flow
+    // stays ZONAL (within +-14 degrees of the equatorial plane): real
+    // trade-wind banks and jet-stream decks stretch along latitude circles,
+    // and a strongly tilted global flow reads from orbit as one combed
+    // diagonal marble no weather story explains.
     const std::uint64_t flowHash = hashCombine64(static_cast<std::uint64_t>(baseSeed), 0xF10Full);
     const double longitude = static_cast<double>(flowHash & 0xFFFFull) / 65536.0 * 6.283185307179586;
-    const double latitude  = (static_cast<double>((flowHash >> 16) & 0x7FFFull) / 32768.0 - 0.5) * 1.5707963267948966;
+    const double latitude  = (static_cast<double>((flowHash >> 16) & 0x7FFFull) / 32768.0 - 0.5) * 0.5;
     flowAxis_ = normalized(Vec3{std::cos(latitude) * std::cos(longitude), std::sin(latitude),
         std::cos(latitude) * std::sin(longitude)});
     spinAxis_ = normalized(Vec3{params.axis[0], params.axis[1], params.axis[2]});
@@ -214,28 +267,46 @@ CloudField::CloudField(const PlanetGenerationParams &params)
     // Cyclone vortices (see coverageTexel): eight seed-derived storms over
     // the mid-latitudes, where the general circulation actually spawns them
     // (a cyclone riding the equatorial belt or the polar cap reads as a
-    // swirl placed by a random brush). The core radius spans a 25th to a
-    // 18th of the circumference - several bank wavelengths across, the
-    // comma-head scale orbital photography resolves - and the shear
-    // strength several core radii of displacement: the shear must dominate
-    // the bank wavelength so the arms wrap fully (a displacement under a
-    // wavelength only dents the banks), while the Rankine envelope keeps
+    // swirl placed by a random brush - the latitude band below also keeps
+    // every storm off the equator, where real cyclones cannot spin up for
+    // lack of Coriolis). PLACEMENT alternates hemispheres and strides
+    // same-hemisphere storms a quarter circle apart (hash-jittered, so every
+    // placement stays seed-specific): a purely hash-derived position
+    // clusters - three of the eight storms can land inside one weather
+    // province - and the storms' cloud shields span a few core radii, so a
+    // clustered pair blankets each other's eyes and lanes and the systems
+    // merge into a single unreadable mass. The stride guarantees the minimum
+    // spacing the shields need to read as separate systems. The core radius
+    // spans a 45th to a 31st of the circumference - the 900-1,300 km
+    // typhoon-class scale orbital photography resolves as ONE storm - and
+    // the shear strength a few core radii of displacement, so the arms wrap
+    // one to two turns around the eyewall while the Rankine envelope keeps
     // the far field untouched.
     const double shellCircumference = 6.283185307179586
         * (params.radiusMeters + params.cloudAltitudeMeters);
+    const double placementPhase = static_cast<double>(hashCombine64(static_cast<std::uint64_t>(baseSeed),
+        0xC7C10E4ull) & 0xFFFFull) / 65536.0 * 6.283185307179586;
     for (std::size_t storm = 0; storm < cyclones_.size(); ++storm)
     {
         const std::uint64_t stormHash = hashCombine64(static_cast<std::uint64_t>(baseSeed),
             0xC7C10E5ull + static_cast<std::uint64_t>(storm) * 0x9E3779B97F4A7C15ull);
-        const double stormLongitude = static_cast<double>(stormHash & 0xFFFFull) / 65536.0 * 6.283185307179586;
-        const double stormLatitude  = (static_cast<double>((stormHash >> 16) & 0x7FFFull) / 32768.0 - 0.5) * 1.2;
+        // Same-hemisphere storms (even/odd indices) stride a quarter circle;
+        // the northern series offsets half that so the closest
+        // cross-hemisphere pair also stays beyond the shields' reach. The
+        // per-storm jitter keeps the lattice from reading as one.
+        const double stormLongitude = placementPhase
+            + static_cast<double>(storm >> 1) * 1.5707963267948966
+            + (storm & 1u) * 0.7853981633974483
+            + (static_cast<double>(stormHash & 0x3FFull) / 1024.0 - 0.5) * 0.42;
+        const double stormLatitude = ((storm & 1u) != 0u ? 1.0 : -1.0)
+            * (0.30 + 0.29 * static_cast<double>((stormHash >> 16) & 0x7FFFull) / 32768.0);
         cyclones_[storm].center = normalized(Vec3{
             std::cos(stormLatitude) * std::cos(stormLongitude), std::sin(stormLatitude),
             std::cos(stormLatitude) * std::sin(stormLongitude)});
         cyclones_[storm].coreMeters = shellCircumference
-            * (0.040 + 0.014 * static_cast<double>((stormHash >> 28) & 0xFull) / 15.0);
+            * (0.022 + 0.010 * static_cast<double>((stormHash >> 28) & 0xFull) / 15.0);
         cyclones_[storm].strength = params_.cloudCycloneStrength
-            * (3.4 + 2.6 * static_cast<double>((stormHash >> 32) & 0xFull) / 15.0);
+            * (2.2 + 1.4 * static_cast<double>((stormHash >> 32) & 0xFull) / 15.0);
     }
 }
 
@@ -268,6 +339,15 @@ double CloudField::sampleCoverage(const Vec3 &unitDirection, double lowPassCutof
         return 0.0; // a (near-)zero direction has no sky position to sample
     }
     Vec3 shellPosition = direction * (params_.radiusMeters + params_.cloudAltitudeMeters);
+    // The TRUE shell position (pre-stretch): the cyclone geometry below
+    // keys off this. The wind stretch inflates positions along the flow by
+    // up to 1/(1-kCloudStretchFactor) - a systematic offset of almost half a
+    // planet radius - so a storm's eye-and-arms computed against the
+    // STRETCHED position land displaced by up to a whole storm radius from
+    // the storm's actual center (the storm then reads as a directionless
+    // blob). The storm anchors to the true sphere; only its WARP rides the
+    // stretched sample position with the banks it shears.
+    const Vec3 trueShellPosition = shellPosition;
 
     // Wind stretch: sample the base banks in a frame compressed along the
     // flow direction, elongating the banks into organized streaks. The
@@ -304,17 +384,123 @@ double CloudField::sampleCoverage(const Vec3 &unitDirection, double lowPassCutof
     // influence tightens the wrap toward the eyewall without dragging the
     // far-field banks around. The displacement stays a pure function of the
     // position, so the texture bake remains deterministic.
+    //
+    // The warp alone cannot draw a readable storm: rotating a uniform deck
+    // inside the core is invisible, and banks only cross a 900-1,300 km core
+    // a few times. Each storm therefore also carries its own SHIELD - a
+    // spiral-arm ring of near-solid coverage around a clearing eye, applied
+    // as a DIRECT coverage pattern over the thresholded field (see the
+    // composite at the return) - so the storm photographs as a bright swirl
+    // regardless of what the ambient field was doing there, the way a real
+    // cyclone organizes its own cloud shield out of whatever moisture the
+    // province holds. The shield ring is round while the warp swirls the
+    // banks through it, and the eye's subsidence clears the eyewall's center
+    // exactly where the wrap is tightest.
+    double stormShield    = 0.0;
+    double stormClearance = 0.0;
     if (texelDetail && includeCycloneShear)
     {
         for (const Cyclone &storm : cyclones_)
         {
-            const Vec3 offset = shellPosition - storm.center
+            const Vec3 offset = trueShellPosition - storm.center
                 * (params_.radiusMeters + params_.cloudAltitudeMeters);
             const double radial = length(offset);
-            if (radial < 1.0e-6 || radial > 4.0 * storm.coreMeters)
+            if (radial < 1.0e-6 || radial > 3.0 * storm.coreMeters)
             {
                 continue;
             }
+            // The storm's own spiral arms: the shield ring is LOBED (two
+            // main arms) and each lobe's phase shifts with the logarithm of
+            // the radius - the classic log-spiral coordinate cos(m*theta -
+            // k*ln(r)) real cyclones photograph - so the arms wrap roughly a
+            // full turn from the eyewall out through the outer bands. The
+            // lobe troughs stay nearly clear (the small floor): the lanes
+            // BETWEEN the arms are what make the spiral read - filled
+            // troughs turn the ring back into a solid disk. A round annulus
+            // cannot carry the spiral signature either (azimuthal warps
+            // leave it invariant), which is why shield-only storms without
+            // the lobes read as rings around dark holes instead of vortices.
+            const Vec3 stormEast = normalized(cross(spinAxis_, storm.center));
+            const Vec3 stormNorth = cross(storm.center, stormEast);
+            // The shield's ragged anatomy (see the kCycloneArmWobble constants):
+            // two band-limited streams at storm-core wavelengths - one steers
+            // the arms' phase, one breathes their radius and knots their
+            // solidity. A per-storm seed keeps neighboring storms' wobble
+            // patterns uncorrelated; the streams sample the TRUE shell
+            // position, so the wobble rotates with the storm instead of
+            // swimming through it.
+            const std::size_t stormIndex = static_cast<std::size_t>(&storm - cyclones_.data());
+            const std::int64_t wobbleSeed = static_cast<std::int64_t>(hashCombine64(
+                static_cast<std::uint64_t>(params_.seed), 0x5B0Full + stormIndex * 0x9E3779B97F4A7C15ull));
+            const FbmStreamSeeds wobbleSeeds = makeFbmSeeds(wobbleSeed, kCloudWispFbm.octaves);
+            const FbmStreamSeeds wobbleRadialSeeds = makeFbmSeeds(
+                static_cast<std::int64_t>(hashCombine64(static_cast<std::uint64_t>(wobbleSeed), 0x71E9ull)),
+                kCloudWispFbm.octaves);
+            const double wobbleWavelength = std::max(storm.coreMeters * 0.6, 1.0);
+            const double wobblePhase = fbm(wobbleSeeds, trueShellPosition, wobbleWavelength,
+                kCloudWispFbm, 0.0);
+            const double wobbleRadial = fbm(wobbleRadialSeeds, trueShellPosition,
+                wobbleWavelength * 0.45, kCloudWispFbm, 0.0);
+            const double azimuth = std::atan2(dot(offset, stormNorth), dot(offset, stormEast))
+                + kCycloneArmWobbleRadians * (2.0 * wobblePhase - 1.0);
+            // The windows below evaluate the shield's radius at the wobbled
+            // radius (the Rankine shear further down keeps the TRUE radius:
+            // the warp's speed profile follows the dynamics, not the paint).
+            const double radialShield = radial * (1.0 + kCycloneRadialWobble * (2.0 * wobbleRadial - 1.0));
+            const double armTwist = kCycloneArmTwistRadians * std::log(radialShield / storm.coreMeters);
+            // The storm's anatomy, the way satellite photography resolves a
+            // mature hurricane: a dark EYE (the subsidence clearing), the
+            // CENTRAL DENSE OVERCAST - a near-solid cloud disk around the
+            // eye whose mass reads by size and solidity in any province -
+            // and trailing SPIRAL BANDS emerging from the overcast's edge,
+            // wrapping outward with partially cleared lanes between them.
+            const double lobePhase = 0.5 + 0.5 * std::cos(2.0 * azimuth - armTwist);
+            const double armLobes = 0.10 + 0.90
+                * smoothstep(-0.55, 0.45, 2.0 * lobePhase - 1.0);
+            const double armWindow = smoothstep(0.85 * storm.coreMeters, 1.25 * storm.coreMeters, radialShield)
+                * (1.0 - smoothstep(2.0 * storm.coreMeters, 2.55 * storm.coreMeters, radialShield));
+            const double overcastWindow = smoothstep(0.45 * storm.coreMeters, 0.70 * storm.coreMeters, radialShield)
+                * (1.0 - smoothstep(1.15 * storm.coreMeters, 1.55 * storm.coreMeters, radialShield));
+            // The storm's share: how solid the shield runs and how hard the
+            // eye and the lanes clear, all scaling with the storm's strength.
+            const double stormWeight
+                = std::clamp(kCycloneShieldPerStrength * storm.strength, 0.0, 1.0);
+            // The sharpened remap keeps the shield OUT of the consumer's
+            // thin-bank midzone: the shell's alpha ramp maps mid coverage to
+            // near-transparent (thin banks), so a shield whose ramps pass
+            // through the midzone renders as bright RGB over a transparent
+            // veil - the ocean shows through the storm's own eyewall. The
+            // remap compresses the shield's radial ramps into crisp edges
+            // (the sharp eyewall real satellite photography shows between
+            // the eye and the overcast) while the ambient deck's own thin
+            // banks keep their mid coverage and read as thin cloud.
+            const double shieldPattern = std::max(armWindow * armLobes, 0.97 * overcastWindow)
+                * (kCycloneSolidityFloor + (1.0 - kCycloneSolidityFloor) * wobbleRadial);
+            stormShield = std::max(stormShield,
+                smoothstep(0.22, 0.55, shieldPattern) * stormWeight);
+            // The eye: the storm's subsidence suppresses the AMBIENT deck
+            // toward clear sky through the eyewall's inner slope, so the eye
+            // reads as a clean dark clearing whatever the province was doing
+            // - a partial gate bleeds patchy banks back into the hole and
+            // the eye reads as one more gap in the deck.
+            const double eyeGate = 1.0 - smoothstep(0.35 * storm.coreMeters, 0.70 * storm.coreMeters, radialShield);
+            // The lanes between the outer bands thin the ambient deck the
+            // same way (a spiral reads by its crest-and-lane contrast), but
+            // only partially - the troughs keep a wisp of ambient so the
+            // bands thin into their province instead of cutting hard gaps
+            // that read as open sea.
+            const double laneGate = armWindow * (1.0 - armLobes) * kCycloneLaneClearance * stormWeight;
+            // The moat: the storm's circulation suppresses the ambient deck
+            // AROUND the shield (a cyclone consumes its neighborhood's
+            // moisture), so the system reads isolated over thinned cloud
+            // instead of drowning in its province's own patchy banks. The
+            // suppression is partial - the province keeps a veil - and fades
+            // out past the shield's rim.
+            const double moatGate = (1.0 - smoothstep(2.2 * storm.coreMeters, 3.2 * storm.coreMeters, radialShield))
+                * 0.5 * stormWeight;
+            stormClearance = std::max(stormClearance,
+                std::max(eyeGate * std::clamp(kCycloneEyePerStrength * storm.strength, 0.0, 1.0),
+                    std::max(laneGate, moatGate)));
             // Tangential (azimuthal) direction around the storm axis.
             Vec3 tangential = cross(storm.center, offset);
             const double tangentialLength = length(tangential);
@@ -328,9 +514,16 @@ double CloudField::sampleCoverage(const Vec3 &unitDirection, double lowPassCutof
             const double speed = (radial < storm.coreMeters
                     ? radial / storm.coreMeters
                     : storm.coreMeters / radial)
-                * (1.0 - smoothstep(3.0 * storm.coreMeters, 4.0 * storm.coreMeters, radial));
+                * (1.0 - smoothstep(2.1 * storm.coreMeters, 3.0 * storm.coreMeters, radial));
+            // The displacement cap is core-relative (a couple of core radii):
+            // inside the core the Rankine speed turns the shear into a rigid
+            // rotation of shearMeters/coreMeters radians, so the cap IS the
+            // wrap budget - 2.2 turns the inner disk about 125 degrees while
+            // the 1/r falloff outside trails the arms into a comma, and a
+            // larger budget combs the whole storm belt into streaks instead
+            // of wrapping one readable vortex.
             const double shearMeters = std::min(storm.strength * storm.coreMeters,
-                kCloudShearMaxWavelengths * params_.cloudWavelengthMeters);
+                kCloudShearMaxCoreRadii * storm.coreMeters);
             const Vec3 inward = offset * (1.0 / radial);
             shellPosition = shellPosition
                 + tangential * (shearMeters * speed)
@@ -475,7 +668,18 @@ double CloudField::sampleCoverage(const Vec3 &unitDirection, double lowPassCutof
             params_.cloudWavelengthMeters * params_.cloudWeatherWavelengthMultiple, kCloudWeatherFbm, lowPassCutoffMeters);
     }
     const double edgeHalfWidth = std::max(0.01, params_.cloudEdgeSoftness * std::max(1.0, softnessScale));
-    return smoothstep(crossing - edgeHalfWidth, crossing + edgeHalfWidth, field);
+    double coverage = smoothstep(crossing - edgeHalfWidth, crossing + edgeHalfWidth, field);
+    // The cyclone shield composites over the thresholded field (see the
+    // storm-arms block): the arms carry their own near-solid coverage and
+    // the eye's subsidence suppresses the ambient deck, so a storm
+    // photographs at full contrast whatever province it sits in, while the
+    // shear warp keeps the ambient banks woven through the ring's lanes -
+    // the shield reads as the province's own cloud, rearranged, not a decal.
+    if (stormShield > 0.0 || stormClearance > 0.0)
+    {
+        coverage = std::max(coverage * (1.0 - stormClearance), stormShield);
+    }
+    return coverage;
 }
 
 double atmosphereWeight(const PlanetGenerationParams &params, double eyeAltitudeMeters)

@@ -182,6 +182,14 @@ struct ReflectionSettings
     // neighborhood's own min/max range so deterministic high-dynamic-range
     // structure survives the clamp).
     float         temporalStrength       = 0.99f;
+
+    // Wall-clock budget for the whole evaluate (update_budget_milliseconds).
+    // 0 traces every texel every frame (the fixed pipeline); a positive
+    // value engages the adaptive stride governor: the measured evaluate cost
+    // feeds back into a 1..8 trace interleave (the skipped texels carry their
+    // reprojected temporal history), so the field refreshes at whatever rate
+    // THIS machine can afford inside the budget.
+    double        updateBudgetMilliseconds = 0.0;
     float         neighborhoodClampSigma = 1.0f;
 
     // Angular radius of the sun disc the reflection module's sky answer
@@ -503,6 +511,17 @@ struct RfPipelineState
     std::vector<RfResolve> fieldResolve;
     std::vector<std::uint8_t> fieldValid;      // 1 = texel carries specular response
     std::vector<float>     fieldRayCount;      // rays accumulated into the raw value this frame
+    // Governor interleave (update_budget_milliseconds): texels whose trace
+    // turn belongs to another frame this frame - the temporal pass carries
+    // their reprojected history instead of a fresh response.
+    std::vector<std::uint8_t> fieldReused;
+    // Adaptive stride (1 = trace every texel) and the per-frame rotation that
+    // spreads the turns; the evaluate governor retunes the stride from the
+    // measured cost (see reflection_field.cpp's feedback block).
+    std::uint32_t traceStride = 1;
+    std::size_t   tracePhase  = 0;
+    double        governorMeasuredMs = 0.0; // EMA of the measured evaluate cost
+    std::uint32_t governorHoldFrames = 0;   // hysteresis: frames until the stride may move
 
     // Denoised, published field (the exported buffer).
     std::vector<glm::vec3> fieldFiltered;

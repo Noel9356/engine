@@ -685,10 +685,11 @@ struct PlanetGenerationParams
     // sub-spacing speckle.
     bool  cloudsEnabled       = true;
     double cloudCoverageAmount    = 0.42;   // approximate sky fraction under cloud (0 = clear)
-    double cloudWavelengthMeters  = 1380000.0; // feature scale of the cloud field (scale with the
-                                             // radius): real mid-latitude weather systems run
-                                             // 1,000-2,500 km across, and 0.2 of Earth's radius
-                                             // lands inside that band
+    double cloudWavelengthMeters  = 520000.0; // feature scale of the cloud field (scale with the
+                                             // radius): the individual cloud masses an orbital
+                                             // photograph resolves run ~200-800 km across - real
+                                             // weather SYSTEMS are larger, but the weather field
+                                             // organizes the banks into those systems instead
     double cloudAltitudeMeters    = 2000.0; // height of the cloud shell above the datum (real
                                              // cumulus bases: ~300-2,400 m over land)
     double cloudDetailStrength    = 0.35;   // amplitude of the fine breakup octave relative to the base field

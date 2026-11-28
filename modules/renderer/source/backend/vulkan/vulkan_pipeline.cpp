@@ -336,7 +336,7 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
     }
 
     {
-        const VkDescriptorSetLayoutBinding frameBindings[2]
+        const VkDescriptorSetLayoutBinding frameBindings[3]
             = {{.binding            = 0,
                    .descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                    .descriptorCount    = 1,
@@ -349,12 +349,20 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
                     .descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     .descriptorCount    = 1,
                     .stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT,
+                    .pImmutableSamplers = nullptr},
+                // binding 2: the reflection_field screen-space field (RGBA32F,
+                // sampled per fragment through texelFetch; a 1x1 neutral
+                // stand-in stays bound while the hook is inactive).
+                {.binding            = 2,
+                    .descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount    = 1,
+                    .stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT,
                     .pImmutableSamplers = nullptr}};
         const VkDescriptorSetLayoutCreateInfo frameLayoutInfo{
             .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext        = nullptr,
             .flags        = 0,
-            .bindingCount = 2,
+            .bindingCount = 3,
             .pBindings    = frameBindings,
         };
         const VkResult frameLayoutResult
@@ -367,7 +375,7 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             return false;
         }
 
-        const VkDescriptorSetLayoutBinding materialBindings[5]
+        const VkDescriptorSetLayoutBinding materialBindings[6]
             = {{.binding               = 0,
                    .descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                    .descriptorCount    = 1,
@@ -392,12 +400,17 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
                     .descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                     .descriptorCount    = 1,
                     .stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT,
+                    .pImmutableSamplers = nullptr},
+                {.binding               = 5,
+                    .descriptorType     = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount    = 1,
+                    .stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT,
                     .pImmutableSamplers = nullptr}};
         const VkDescriptorSetLayoutCreateInfo materialLayoutInfo{
             .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext        = nullptr,
             .flags        = 0,
-            .bindingCount = 5,
+            .bindingCount = 6,
             .pBindings    = materialBindings,
         };
         const VkResult materialLayoutResult
@@ -409,6 +422,35 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
                 resultName(materialLayoutResult, resultScratch, sizeof(resultScratch)));
             return false;
         }
+        // Set 2 (mesh pipelines only): the material extension block - a
+        // dynamic-offset UBO whose 48-byte blocks carry the per-material
+        // fields that do not fit the 128-byte push-constant budget (the
+        // distance-fog triple, the procedural mottle pair and the near-field
+        // relief overlay's triple; see mesh.frag's MaterialExtension and
+        // VulkanResources' extension ring).
+        const VkDescriptorSetLayoutBinding extensionBinding{
+            .binding            = 0,
+            .descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+            .descriptorCount    = 1,
+            .stageFlags         = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = nullptr,
+        };
+        const VkDescriptorSetLayoutCreateInfo extensionLayoutInfo{
+            .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .pNext        = nullptr,
+            .flags        = 0,
+            .bindingCount = 1,
+            .pBindings    = &extensionBinding,
+        };
+        const VkResult extensionLayoutResult
+            = vkCreateDescriptorSetLayout(vulkanDevice, &extensionLayoutInfo, nullptr, &materialExtensionSetLayout_);
+        if (extensionLayoutResult != VK_SUCCESS)
+        {
+            std::fprintf(stderr,
+                "renderer module: vkCreateDescriptorSetLayout failed (%s)\n",
+                resultName(extensionLayoutResult, resultScratch, sizeof(resultScratch)));
+            return false;
+        }
     }
 
     {
@@ -417,12 +459,13 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             .offset     = 0,
             .size       = sizeof(PushConstants),
         };
-        const VkDescriptorSetLayout      setLayouts[2] = {frameSetLayout_, materialSetLayout_};
+        const VkDescriptorSetLayout      setLayouts[3] = {frameSetLayout_, materialSetLayout_,
+            materialExtensionSetLayout_};
         const VkPipelineLayoutCreateInfo layoutInfo{
             .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext                  = nullptr,
             .flags                  = 0,
-            .setLayoutCount         = 2,
+            .setLayoutCount         = 3,
             .pSetLayouts            = setLayouts,
             .pushConstantRangeCount = 1,
             .pPushConstantRanges    = &pushRange,
@@ -472,19 +515,18 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             return false;
         }
     }
-    // The mesh pipeline exists in six variants: the default (writes depth,
-    // like every opaque pass), a no-write twin for backdrop materials whose
-    // depthWrite flag is off (depth testing stays on; the shell must not
-    // poison the depth buffer the opaque passes draw into), a two-sided
-    // twin of each (cull mode NONE) for double-sided materials whose
-    // fragments may face either way (cloth sheets, flags, thin shells), and a
-    // transparent twin of the two-sided pair (src-alpha blending, depth
-    // write off) for materials whose opacity is below 1 - the transparent
-    // pass the material contract documents; mesh.frag already writes
-    // oColor.a for this blend.
-    // Everything else - layout, shaders, dynamic state - is identical, so
-    // one builder lambda stamps all six.
-    const auto createMeshPipeline = [&](bool depthWriteEnable, bool twoSided, bool transparent, VkPipeline &outPipeline) -> bool
+    // The mesh pipeline family has three independent axes (see meshPipeline()
+    // in the header): depth-write (backdrop shells and every transparent
+    // draw leave the depth buffer alone), two-sidedness (cull mode NONE for
+    // double-sided materials), winding convention (VK_FRONT_FACE_CLOCKWISE
+    // for materials that declare the mirrored convention), and transparency
+    // (src-alpha / one-minus-src-alpha blending, the software rasterizer's
+    // transparent-commit twin). The transparent axis fixes depth-write off,
+    // so the family holds eight opaque plus four blended variants. Everything
+    // else - layout, shaders - is identical, so one builder lambda stamps
+    // them all.
+    const auto createMeshPipeline = [&](bool depthWriteEnable, bool twoSided, bool cwWinding, bool alphaBlend,
+                                   VkPipeline &outPipeline) -> bool
     {
         // Plain locals (not static): the values derive from this build's own
         // srgbOutput_, so a second renderer in the process with a different
@@ -575,7 +617,7 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             .rasterizerDiscardEnable = VK_FALSE,
             .polygonMode             = VK_POLYGON_MODE_FILL,
             .cullMode                = cullMode,
-            .frontFace               = VK_FRONT_FACE_CLOCKWISE,
+            .frontFace               = cwWinding ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE,
             .depthBiasEnable         = VK_FALSE,
             .depthBiasConstantFactor = 0.0f,
             .depthBiasClamp          = 0.0f,
@@ -598,7 +640,7 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             .pNext                 = nullptr,
             .flags                 = 0,
             .depthTestEnable       = VK_TRUE,
-            .depthWriteEnable      = (depthWriteEnable && !transparent) ? VK_TRUE : VK_FALSE,
+            .depthWriteEnable      = (depthWriteEnable && !alphaBlend) ? VK_TRUE : VK_FALSE,
             .depthCompareOp        = VK_COMPARE_OP_LESS,
             .depthBoundsTestEnable = VK_FALSE,
             .stencilTestEnable     = VK_FALSE,
@@ -607,34 +649,17 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
             .minDepthBounds        = 0.0f,
             .maxDepthBounds        = 1.0f,
         };
-        // Blend state: the opaque variants write straight through; the
-        // transparent twins blend src-alpha / one-minus-src-alpha (the same
-        // fixed-function blend the fur and overlay pipelines and the headless
-        // rasterizer's transparent commit use, matching oColor.a's
-        // opacity-times-texel-alpha).
-        VkPipelineColorBlendAttachmentState colorAttachment{};
-        if (transparent)
-        {
-            colorAttachment.blendEnable         = VK_TRUE;
-            colorAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-            colorAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            colorAttachment.colorBlendOp        = VK_BLEND_OP_ADD;
-            colorAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            colorAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            colorAttachment.alphaBlendOp        = VK_BLEND_OP_ADD;
-        }
-        else
-        {
-            colorAttachment.blendEnable         = VK_FALSE;
-            colorAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-            colorAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
-            colorAttachment.colorBlendOp        = VK_BLEND_OP_ADD;
-            colorAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            colorAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-            colorAttachment.alphaBlendOp        = VK_BLEND_OP_ADD;
-        }
-        colorAttachment.colorWriteMask
-            = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        const VkPipelineColorBlendAttachmentState colorAttachment{
+            .blendEnable         = alphaBlend ? VK_TRUE : VK_FALSE,
+            .srcColorBlendFactor = alphaBlend ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = alphaBlend ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp        = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = alphaBlend ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = alphaBlend ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp        = VK_BLEND_OP_ADD,
+            .colorWriteMask
+            = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        };
         const VkPipelineColorBlendStateCreateInfo colorBlend{
             .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             .pNext           = nullptr,
@@ -758,37 +783,40 @@ bool VulkanPipeline::build(const VulkanDeviceContext &device, VkFormat colorForm
         }
         return true;
     };
-    if (!createMeshPipeline(true, false, false, pipeline_))
+    const auto buildMeshFamily = [this, &createMeshPipeline]() -> bool
     {
-        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
-        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
-        return false;
-    }
-    if (!createMeshPipeline(false, false, false, pipelineNoDepthWrite_))
-    {
-        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
-        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
-        return false;
-    }
-    if (!createMeshPipeline(true, true, false, pipelineTwoSided_))
-    {
-        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
-        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
-        return false;
-    }
-    if (!createMeshPipeline(false, true, false, pipelineTwoSidedNoDepthWrite_))
-    {
-        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
-        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
-        return false;
-    }
-    if (!createMeshPipeline(false, false, true, pipelineTransparent_))
-    {
-        vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
-        vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
-        return false;
-    }
-    if (!createMeshPipeline(false, true, true, pipelineTransparentTwoSided_))
+        const struct VariantSpec
+        {
+            bool     depthWrite;
+            bool     twoSided;
+            bool     cwWinding;
+            bool     alphaBlend;
+            VkPipeline *out;
+        } variants[12] = {
+            {true,  false, false, false, &pipeline_},
+            {false, false, false, false, &pipelineNoDepthWrite_},
+            {true,  true,  false, false, &pipelineTwoSided_},
+            {false, true,  false, false, &pipelineTwoSidedNoDepthWrite_},
+            {true,  false, true,  false, &pipelineCwWinding_},
+            {false, false, true,  false, &pipelineCwWindingNoDepthWrite_},
+            {true,  true,  true,  false, &pipelineTwoSidedCwWinding_},
+            {false, true,  true,  false, &pipelineTwoSidedCwWindingNoDepthWrite_},
+            {false, false, false, true,  &pipelineTransparent_},
+            {false, true,  false, true,  &pipelineTwoSidedTransparent_},
+            {false, false, true,  true,  &pipelineTransparentCwWinding_},
+            {false, true,  true,  true,  &pipelineTwoSidedTransparentCwWinding_},
+        };
+        for (const VariantSpec &variant : variants)
+        {
+            if (!createMeshPipeline(variant.depthWrite, variant.twoSided, variant.cwWinding, variant.alphaBlend,
+                    *variant.out))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!buildMeshFamily())
     {
         vkDestroyShaderModule(vulkanDevice, vertexModule, nullptr);
         vkDestroyShaderModule(vulkanDevice, fragmentModule, nullptr);
@@ -1357,15 +1385,16 @@ void VulkanPipeline::destroy(VkDevice device)
         vkDestroyPipeline(device, pipelineTwoSidedNoDepthWrite_, nullptr);
         pipelineTwoSidedNoDepthWrite_ = VK_NULL_HANDLE;
     }
-    if (pipelineTransparent_ != VK_NULL_HANDLE)
+    VkPipeline *const meshFamily[8] = {&pipelineCwWinding_, &pipelineCwWindingNoDepthWrite_, &pipelineTwoSidedCwWinding_,
+        &pipelineTwoSidedCwWindingNoDepthWrite_, &pipelineTransparent_, &pipelineTwoSidedTransparent_,
+        &pipelineTransparentCwWinding_, &pipelineTwoSidedTransparentCwWinding_};
+    for (VkPipeline *pipeline : meshFamily)
     {
-        vkDestroyPipeline(device, pipelineTransparent_, nullptr);
-        pipelineTransparent_ = VK_NULL_HANDLE;
-    }
-    if (pipelineTransparentTwoSided_ != VK_NULL_HANDLE)
-    {
-        vkDestroyPipeline(device, pipelineTransparentTwoSided_, nullptr);
-        pipelineTransparentTwoSided_ = VK_NULL_HANDLE;
+        if (*pipeline != VK_NULL_HANDLE)
+        {
+            vkDestroyPipeline(device, *pipeline, nullptr);
+            *pipeline = VK_NULL_HANDLE;
+        }
     }
     if (pipelineLayout_ != VK_NULL_HANDLE)
     {
@@ -1376,6 +1405,11 @@ void VulkanPipeline::destroy(VkDevice device)
     {
         vkDestroyDescriptorSetLayout(device, materialSetLayout_, nullptr);
         materialSetLayout_ = VK_NULL_HANDLE;
+    }
+    if (materialExtensionSetLayout_ != VK_NULL_HANDLE)
+    {
+        vkDestroyDescriptorSetLayout(device, materialExtensionSetLayout_, nullptr);
+        materialExtensionSetLayout_ = VK_NULL_HANDLE;
     }
     if (frameSetLayout_ != VK_NULL_HANDLE)
     {
@@ -1420,6 +1454,34 @@ std::size_t VulkanPipeline::flushPipelineCacheToDisk(VkDevice device)
             savedBytes);
     }
     return savedBytes;
+}
+
+// Mesh-family variant resolution (see the axis table in the header): the
+// transparent axis fixes depth-write off, so a transparent request ignores
+// the depthWrite flag.
+VkPipeline VulkanPipeline::meshPipeline(bool depthWrite, bool twoSided, bool cwWinding, bool transparent) const
+{
+    if (transparent)
+    {
+        if (twoSided)
+        {
+            return cwWinding ? pipelineTwoSidedTransparentCwWinding_ : pipelineTwoSidedTransparent_;
+        }
+        return cwWinding ? pipelineTransparentCwWinding_ : pipelineTransparent_;
+    }
+    if (twoSided)
+    {
+        if (cwWinding)
+        {
+            return depthWrite ? pipelineTwoSidedCwWinding_ : pipelineTwoSidedCwWindingNoDepthWrite_;
+        }
+        return depthWrite ? pipelineTwoSided_ : pipelineTwoSidedNoDepthWrite_;
+    }
+    if (cwWinding)
+    {
+        return depthWrite ? pipelineCwWinding_ : pipelineCwWindingNoDepthWrite_;
+    }
+    return depthWrite ? pipeline_ : pipelineNoDepthWrite_;
 }
 
 } // namespace renderer

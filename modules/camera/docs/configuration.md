@@ -7,6 +7,7 @@ Every value is read once per `loadCameraDefaults()` (in `construct()`, and again
 | Key | Type | Valid range (validated in `loadCameraDefaults()`) | Default (`config.toml`) | Effect |
 | --- | --- | --- | --- | --- |
 | `camera.far_z` | float | finite, `(0, 1.0e9]` | `100.0` | Default far-plane distance. Independently of the range check, `far_z` must exceed `near_z`; otherwise the module warns and uses `max(built-in far plane, near_z + 1)`. |
+| `camera.fly_movement_follows_pitch` | bool | - | `true` | Fly-mode movement plane: `true` moves the forward axis along the full pitched view direction (free-flight convention - looking down and pressing forward dives), `false` walks the orientation basis's horizontal plane (first-person convention - pitch only steers the gaze, Space/Ctrl ride the height axis). Orbit and Fixed modes ignore it. |
 | `camera.fov_degrees` | float | finite, exclusive `(0.1, 179)` | `55.0` | Default vertical FOV in degrees for perspective cameras (the hard clamp bounds every camera's FOV, endpoints excluded). |
 | `camera.look_down_key` | string | any (never read by the module) | `"down"` | Key-binding declaration for consumers; see the note below the table. |
 | `camera.look_left_key` | string | any (never read by the module) | `"left"` | As above. |

@@ -1,5 +1,6 @@
 config_keys           = [
     "camera.far_z",
+    "camera.fly_movement_follows_pitch",
     "camera.fov_degrees",
     "camera.look_down_key",
     "camera.look_left_key",

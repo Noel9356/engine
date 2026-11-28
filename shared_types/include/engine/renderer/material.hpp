@@ -124,6 +124,23 @@ struct MeshMaterial
     float fogColor[3]    = {0.0f, 0.0f, 0.0f};
     float fogScaleMeters = 1000.0f;
     float fogAsymptote   = 0.0f;
+
+    // Near-field relief overlay: a second, much finer-tiling normal map
+    // (detailNormalTexture) whose influence fades in as the camera
+    // approaches - full at detailFadeStartMeters, gone at
+    // detailFadeEndMeters - so the ground gains real grain while the eye
+    // descends instead of re-showing the same base tiling at every
+    // distance. The overlay samples the map at detailUvScale times the
+    // draw's own UVs (e.g. 10 = one detail tile per tenth of a base tile,
+    // keeping the overlay independent of how the caller parameterized the
+    // mesh) and perturbs the tangent-space normal by detailStrength before
+    // the TBN transform. detailUvScale 0.0f (or an unset texture) disables
+    // the overlay. Field order is append-only.
+    TextureHandle detailNormalTexture  = invalidTexture;
+    float         detailUvScale        = 0.0f;
+    float         detailFadeStartMeters = 2.0f;
+    float         detailFadeEndMeters   = 40.0f;
+    float         detailStrength       = 1.0f;
 };
 
 } // namespace engine::renderer

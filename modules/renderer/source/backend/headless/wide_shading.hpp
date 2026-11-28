@@ -39,9 +39,11 @@
 #include "sun_shadows.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <utility>
+
 #include <cstdint>
 #include <limits>
-
 #ifndef ENGINE_RASTERIZER_INLINE
 #if defined(__GNUC__) || defined(__clang__)
 #define ENGINE_RASTERIZER_INLINE inline __attribute__((always_inline))
@@ -88,9 +90,9 @@ inline bool avx512Available()
 // pairs at once. Lane i returns the same value the scalar sampler computes
 // for its pair: the early-outs (invalid map, back-facing normal, projection
 // outside the map) leave the lane at 1.0 through masked selects instead of
-// branches, and the tap loop's four box corners become four gathers over
-// map.depth with the scalar path's integer truncation, bounds rule and ramp
-// clamps.
+// branches, and the rotated Poisson disk's taps (plus the blocker search's)
+// become gathers over map.depth with the scalar path's integer truncation,
+// bounds rule and ramp clamps.
 ENGINE_RASTERIZER_INLINE __m512 sunShadowVisibilityWide(const sunshadows::SunShadowMap &map, __m512 posX, __m512 posY,
     __m512 posZ, __m512 nrmX, __m512 nrmY, __m512 nrmZ, float filterRadiusTexels)
 {
@@ -164,7 +166,7 @@ ENGINE_RASTERIZER_INLINE __m512 sunShadowVisibilityWide(const sunshadows::SunSha
     const __m512 refDepth = _mm512_sub_ps(depth, bias);
 
     const __m512 mapSize = _mm512_set1_ps(static_cast<float>(map.resolution));
-    const __m512 radius = _mm512_max_ps(_mm512_set1_ps(filterRadiusTexels), _mm512_setzero_ps());
+    const __m512 baseRadius = _mm512_max_ps(_mm512_set1_ps(filterRadiusTexels), _mm512_setzero_ps());
     // The ramp constants stay scalar (the map is one shared projection), so
     // the scalar path's compare-and-invert reads the same values.
     const float compareRampScalar = 1.5f * map.texelWorldSize / map.depthExtent;
@@ -210,6 +212,18 @@ ENGINE_RASTERIZER_INLINE __m512 sunShadowVisibilityWide(const sunshadows::SunSha
         const __m512 lit = _mm512_min_ps(_mm512_max_ps(ramp, zero), one);
         return _mm512_mask_mov_ps(one, tapInside, lit);
     };
+    // Raw stored depth (the blocker search's gather; out-of-bounds taps read
+    // the empty-map 1.0 exactly like the scalar sampler's tapDepth).
+    const auto tapDepthWide = [&](__m512 tapX, __m512 tapY) -> __m512
+    {
+        const __m512i columnI = _mm512_cvttps_epi32(tapX);
+        const __m512i rowI = _mm512_cvttps_epi32(tapY);
+        const __m512i index = _mm512_add_epi32(
+            _mm512_mullo_epi32(rowI, _mm512_set1_epi32(static_cast<std::int32_t>(map.resolution))), columnI);
+        const __m512i safeIndex = _mm512_min_epi32(_mm512_max_epi32(index, _mm512_set1_epi32(0)),
+            _mm512_set1_epi32(static_cast<std::int32_t>(map.resolution * map.resolution - 1u)));
+        return _mm512_i32gather_ps(safeIndex, map.depth.data(), 4);
+    };
 
     __m512 sum;
     if (filterRadiusTexels < 0.25f) // the scalar path's own scalar branch
@@ -218,11 +232,100 @@ ENGINE_RASTERIZER_INLINE __m512 sunShadowVisibilityWide(const sunshadows::SunSha
     }
     else
     {
-        const __m512 sumA = _mm512_add_ps(tapLitWide(_mm512_sub_ps(sampleU, radius), _mm512_sub_ps(sampleV, radius)),
-            tapLitWide(_mm512_add_ps(sampleU, radius), _mm512_sub_ps(sampleV, radius)));
-        const __m512 sumB = _mm512_add_ps(tapLitWide(_mm512_sub_ps(sampleU, radius), _mm512_add_ps(sampleV, radius)),
-            tapLitWide(_mm512_add_ps(sampleU, radius), _mm512_add_ps(sampleV, radius)));
-        sum = _mm512_mul_ps(_mm512_add_ps(sumA, sumB), _mm512_set1_ps(0.25f));
+        // Rotated Poisson disk + blocker search, lane-for-lane the scalar
+        // sampler's recipe (see sun_shadows.hpp): the per-lane rotation
+        // hash builds the lane's cos/sin through the same fmod/sin/floor
+        // sequence (the sixteen scalar hashes amortize over the twelve
+        // gathers they steer), the blocker pass averages the occluder
+        // depth over four taps in shadow, and the disk radius grows with
+        // the occluder distance before the twelve-tap filter runs.
+        static constexpr float kPoissonX[12] = {-0.326f, -0.406f, -0.794f, 0.212f, 0.713f, -0.078f,
+            0.484f, -0.156f, -0.601f, 0.970f, 0.532f, -0.473f};
+        static constexpr float kPoissonY[12] = {-0.588f, 0.234f, 0.187f, 0.740f, -0.366f, -0.646f,
+            0.344f, 0.916f, 0.425f, 0.006f, -0.711f, 0.047f};
+        static constexpr float kBlockerX[4] = {-0.408f, 0.408f, -0.245f, 0.573f};
+        static constexpr float kBlockerY[4] = {0.408f, -0.408f, 0.522f, -0.139f};
+        alignas(64) float laneX[16];
+        alignas(64) float laneY[16];
+        alignas(64) float laneZ[16];
+        _mm512_store_ps(laneX, posX);
+        _mm512_store_ps(laneY, posY);
+        _mm512_store_ps(laneZ, posZ);
+        alignas(64) float cosLane[16];
+        alignas(64) float sinLane[16];
+        alignas(64) float tapPhaseLane[16];
+        for (std::uint32_t lane = 0; lane < 16; ++lane)
+        {
+            const float positionHash = std::fmod(
+                std::sin(laneX[lane] * 12.9898f + laneY[lane] * 78.233f + laneZ[lane] * 37.719f) * 43758.5453f, 1.0f);
+            const float hash01 = positionHash - std::floor(positionHash);
+            const float angle  = hash01 * 6.2831853f;
+            cosLane[lane] = std::cos(angle);
+            sinLane[lane] = std::sin(angle);
+            // Radius-jitter hash (the scalar path's radiusHash twin): drives
+            // the per-tap radius scaling so the disk's fixed radii stop
+            // leaving ring-banded penumbras along shadow edges.
+            const float radiusHash = std::fmod(
+                std::sin(laneX[lane] * 93.989f + laneY[lane] * 67.345f + laneZ[lane] * 11.135f) * 24634.6345f, 1.0f);
+            tapPhaseLane[lane] = radiusHash - std::floor(radiusHash);
+        }
+        const __m512 cosA = _mm512_load_ps(cosLane);
+        const __m512 sinA = _mm512_load_ps(sinLane);
+        const __m512 tapPhase = _mm512_load_ps(tapPhaseLane);
+        // Blocker pass: four taps at the base radius; lanes in shadow
+        // accumulate their stored depth (in shadow = stored < refDepth).
+        const auto blockerOffset = [&](std::uint32_t tap) -> std::pair<__m512, __m512>
+        {
+            const __m512 rx = _mm512_sub_ps(_mm512_mul_ps(cosA, _mm512_set1_ps(kBlockerX[tap])),
+                _mm512_mul_ps(sinA, _mm512_set1_ps(kBlockerY[tap])));
+            const __m512 ry = _mm512_add_ps(_mm512_mul_ps(sinA, _mm512_set1_ps(kBlockerX[tap])),
+                _mm512_mul_ps(cosA, _mm512_set1_ps(kBlockerY[tap])));
+            return {_mm512_fmadd_ps(rx, baseRadius, sampleU), _mm512_fmadd_ps(ry, baseRadius, sampleV)};
+        };
+        __m512 blockerSum = _mm512_setzero_ps();
+        __m512 blockerHits = _mm512_setzero_ps();
+        for (std::uint32_t tap = 0; tap < 4; ++tap)
+        {
+            const auto [bx, by] = blockerOffset(tap);
+            const __m512 stored = tapDepthWide(bx, by);
+            const __mmask16 occluded = _mm512_mask_cmp_ps_mask(insideMap, stored, refDepth, _CMP_LT_OQ);
+            blockerSum = _mm512_mask_add_ps(blockerSum, occluded, blockerSum, stored);
+            blockerHits = _mm512_mask_add_ps(blockerHits, occluded, blockerHits, one);
+        }
+        // radius = where(hit, clamp(baseRadius * (1 + occluderMeters/(texel*8)), 1, 3*baseRadius), baseRadius):
+        // lanes the blocker pass found no occluder for keep the base radius
+        // (the scalar path's if) instead of dividing zero by zero.
+        const __m512 occluderMeters = _mm512_mul_ps(_mm512_sub_ps(refDepth, _mm512_div_ps(blockerSum, blockerHits)),
+            _mm512_set1_ps(map.depthExtent));
+        const __m512 grown = _mm512_fmadd_ps(_mm512_div_ps(occluderMeters,
+            _mm512_set1_ps(std::max(map.texelWorldSize * 8.0f, 1.0e-4f))), baseRadius, baseRadius);
+        const __m512 clampedGrown = _mm512_min_ps(_mm512_max_ps(grown, _mm512_set1_ps(1.0f)),
+            _mm512_mul_ps(baseRadius, _mm512_set1_ps(3.0f)));
+        const __m512 radius = _mm512_mask_mov_ps(baseRadius,
+            _mm512_cmp_ps_mask(blockerHits, _mm512_setzero_ps(), _CMP_GT_OQ), clampedGrown);
+        sum = _mm512_setzero_ps();
+        for (std::uint32_t tap = 0; tap < 12; ++tap)
+        {
+            const __m512 px = _mm512_sub_ps(_mm512_mul_ps(cosA, _mm512_set1_ps(kPoissonX[tap])),
+                _mm512_mul_ps(sinA, _mm512_set1_ps(kPoissonY[tap])));
+            const __m512 py = _mm512_add_ps(_mm512_mul_ps(sinA, _mm512_set1_ps(kPoissonX[tap])),
+                _mm512_mul_ps(cosA, _mm512_set1_ps(kPoissonY[tap])));
+            // Per-tap radius jitter (the scalar twin): fract-hash chain,
+            // one multiply-add per lane per tap (a vector sin does not exist
+            // here and sixteen scalar sins per tap would outcost the depth
+            // gathers the jitter steers).
+            alignas(64) float jitterLane[16];
+            const float        tapShift = static_cast<float>(tap) * 0.61803398875f;
+            for (std::uint32_t lane = 0; lane < 16; ++lane)
+            {
+                const float tapHash = tapPhaseLane[lane] * 7.61f + tapShift;
+                jitterLane[lane] = 1.0f + 0.28f * (2.0f * (tapHash - std::floor(tapHash)) - 1.0f);
+            }
+            const __m512 jitteredRadius = _mm512_mul_ps(radius, _mm512_load_ps(jitterLane));
+            sum = _mm512_add_ps(sum, tapLitWide(_mm512_fmadd_ps(px, jitteredRadius, sampleU),
+                _mm512_fmadd_ps(py, jitteredRadius, sampleV)));
+        }
+        sum = _mm512_mul_ps(sum, _mm512_set1_ps(1.0f / 12.0f));
     }
     return _mm512_mask_mov_ps(one, insideMap, sum);
 }
@@ -297,7 +400,8 @@ ENGINE_RASTERIZER_INLINE void toneMapSoA16(__m512 &x, __m512 &y, __m512 &z, pbr:
 // block; inactive lanes carry the computed value too (branch-free) and the
 // caller ignores them.
 ENGINE_RASTERIZER_INLINE void shadeRun16(const shadingrun::RunContext &context, const glm::vec3 position[3],
-    const glm::vec3 normal[3], const glm::vec3 color[3], const WideRunInputs &inputs, float (*outShaded)[16])
+    const glm::vec3 normal[3], const glm::vec3 color[3], const WideRunInputs &inputs, float (*outShaded)[16],
+    float (*outEnvSpecular)[16])
 {
     const __m512 corrA = _mm512_loadu_ps(inputs.correctedA);
     const __m512 corrB = _mm512_loadu_ps(inputs.correctedB);
@@ -493,6 +597,74 @@ ENGINE_RASTERIZER_INLINE void shadeRun16(const shadingrun::RunContext &context, 
         _mm512_mul_ps(albY, metallic));
     const __m512 f0Z = _mm512_add_ps(_mm512_mul_ps(_mm512_set1_ps(dielectricF0.z), oneMinusMetallic),
         _mm512_mul_ps(albZ, metallic));
+
+    // ---- analytic environment specular (pbrEnvSpecular's 16-lane twin) ------
+    // See shadeRun4's block: the result rides the run's color AND is
+    // exported through outEnvSpecular so the caller's traced reflection
+    // field can replace it per lane (commitRunLane subtracts it when the
+    // field answers).
+    {
+        const __m512 twoNDotV = _mm512_mul_ps(nDotV, _mm512_set1_ps(2.0f));
+        const __m512 reflX = _mm512_sub_ps(_mm512_mul_ps(nrmX, twoNDotV), viewX);
+        const __m512 reflY = _mm512_sub_ps(_mm512_mul_ps(nrmY, twoNDotV), viewY);
+        const __m512 reflZ = _mm512_sub_ps(_mm512_mul_ps(nrmZ, twoNDotV), viewZ);
+        const __m512 blur = _mm512_mul_ps(roughness, roughness);
+        const __m512 lobeRaw = _mm512_add_ps(_mm512_mul_ps(reflY, _mm512_set1_ps(0.5f)), _mm512_set1_ps(0.5f));
+        const __m512 lobeUp = _mm512_add_ps(_mm512_mul_ps(lobeRaw, _mm512_sub_ps(one, blur)),
+            _mm512_mul_ps(_mm512_set1_ps(0.5f), blur));
+        const __m512 invLobeUp = _mm512_sub_ps(one, lobeUp);
+        const __m512 radianceX = _mm512_add_ps(
+            _mm512_mul_ps(_mm512_set1_ps(context.ambientGround.x), invLobeUp),
+            _mm512_mul_ps(_mm512_set1_ps(context.ambientSky.x), lobeUp));
+        const __m512 radianceY = _mm512_add_ps(
+            _mm512_mul_ps(_mm512_set1_ps(context.ambientGround.y), invLobeUp),
+            _mm512_mul_ps(_mm512_set1_ps(context.ambientSky.y), lobeUp));
+        const __m512 radianceZ = _mm512_add_ps(
+            _mm512_mul_ps(_mm512_set1_ps(context.ambientGround.z), invLobeUp),
+            _mm512_mul_ps(_mm512_set1_ps(context.ambientSky.z), lobeUp));
+        const __m512 rX = _mm512_add_ps(_mm512_mul_ps(roughness, _mm512_set1_ps(-1.0f)), one);
+        const __m512 rY = _mm512_add_ps(_mm512_mul_ps(roughness, _mm512_set1_ps(-0.0275f)), _mm512_set1_ps(0.0425f));
+        const __m512 rZ = _mm512_add_ps(_mm512_mul_ps(roughness, _mm512_set1_ps(-0.572f)), _mm512_set1_ps(1.04f));
+        const __m512 rW = _mm512_add_ps(_mm512_mul_ps(roughness, _mm512_set1_ps(0.022f)), _mm512_set1_ps(-0.04f));
+        // exp(-9.28 * nDotV) - no vector exp on AVX-512, so evaluate per
+        // lane (one scalar exp per lane, the same rate the 4-wide kernel
+        // pays; the values match the scalar twin exactly).
+        alignas(64) float nDotVLane[16];
+        alignas(64) float rXLane[16];
+        alignas(64) float rYLane[16];
+        alignas(64) float a004Lane[16];
+        _mm512_store_ps(nDotVLane, nDotV);
+        _mm512_store_ps(rXLane, rX);
+        _mm512_store_ps(rYLane, rY);
+        for (int lane = 0; lane < 16; ++lane)
+        {
+            a004Lane[lane] = std::min(rXLane[lane] * rXLane[lane], std::exp(-9.28f * nDotVLane[lane])) * rXLane[lane]
+                + rYLane[lane];
+        }
+        const __m512 a004 = _mm512_load_ps(a004Lane);
+        const __m512 abX = _mm512_add_ps(_mm512_mul_ps(a004, _mm512_set1_ps(-1.04f)), rZ);
+        const __m512 abY = _mm512_add_ps(_mm512_mul_ps(a004, _mm512_set1_ps(1.04f)), rW);
+        const __m512 envScale = _mm512_mul_ps(occlusion, _mm512_loadu_ps(inputs.skyVisibility));
+        const __m512 envSpecX = _mm512_mul_ps(_mm512_mul_ps(radianceX,
+                                                _mm512_add_ps(_mm512_mul_ps(f0X, abX), abY)),
+            envScale);
+        const __m512 envSpecY = _mm512_mul_ps(_mm512_mul_ps(radianceY,
+                                                _mm512_add_ps(_mm512_mul_ps(f0Y, abX), abY)),
+            envScale);
+        const __m512 envSpecZ = _mm512_mul_ps(_mm512_mul_ps(radianceZ,
+                                                _mm512_add_ps(_mm512_mul_ps(f0Z, abX), abY)),
+            envScale);
+        resultX = _mm512_add_ps(resultX, envSpecX);
+        resultY = _mm512_add_ps(resultY, envSpecY);
+        resultZ = _mm512_add_ps(resultZ, envSpecZ);
+        if (outEnvSpecular != nullptr)
+        {
+            _mm512_storeu_ps(outEnvSpecular[0], envSpecX);
+            _mm512_storeu_ps(outEnvSpecular[1], envSpecY);
+            _mm512_storeu_ps(outEnvSpecular[2], envSpecZ);
+        }
+    }
+
     const __m512 invPi = _mm512_set1_ps(1.0f / glm::pi<float>());
     // diffuse = albedo * ((1 - metallic) * invPi); no opacity factor (see the
     // ambient block's note).

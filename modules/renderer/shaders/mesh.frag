@@ -66,6 +66,13 @@ layout(std140, set = 0, binding = 0) uniform FrameData
     vec4 uProbeGridB; // xyz = level0 dimensions, w = level1 spacing
     vec4 uProbeGridC; // xyz = level1 dimensions, w = grid active (1.0 = probes bound)
     vec4 uProbeGridD; // x = probe count, y = direction resolution, z = level0 offset, w = level1 offset
+    // reflection_field screen-space field header (the indirect-specular hook;
+    // the RGBA32F texels ride the set-0 binding-2 sampler below): the field's
+    // own GL-convention camera plus (width, height, max traced roughness,
+    // active). mesh.vert reads only the leading members, so its shorter
+    // block declaration stays valid.
+    mat4 uFieldViewProj;
+    vec4 uFieldMeta;      // x = width, y = height, z = max roughness, w = active
 } frameData;
 
 // radiance_cache probe records, 8 vec4 per probe: (position.xyz, validity) then
@@ -76,7 +83,14 @@ layout(std430, set = 0, binding = 1) readonly buffer ProbeData
     vec4 probeRecords[];
 };
 
-// One material descriptor set (the layout's set 1): five combined image
+// reflection_field screen-space field: RGBA32F, one texel per field cell
+// (radiance.rgb + the texel's surface roughness in alpha; alpha at the
+// neutral 1.0 marks an untraced texel). Read through texelFetch - the manual
+// bilinear below needs no filtering, so float-filter device support never
+// gates the hook.
+layout(set = 0, binding = 2) uniform sampler2D uReflectionField;
+
+// One material descriptor set (the layout's set 1): six combined image
 // samplers, one binding per map. The renderer fills every slot - a material
 // without a map samples the neutral stand-in - so the declarations must keep
 // these exact set/binding numbers (they must match vulkan_pipeline.cpp's
@@ -86,6 +100,20 @@ layout(set = 1, binding = 1) uniform sampler2D uNormalTexture;
 layout(set = 1, binding = 2) uniform sampler2D uMetallicRoughnessTexture;
 layout(set = 1, binding = 3) uniform sampler2D uOcclusionTexture;
 layout(set = 1, binding = 4) uniform sampler2D uEmissiveTexture;
+layout(set = 1, binding = 5) uniform sampler2D uDetailNormalTexture;
+
+// The material extension block (the layout's set 2, a dynamic-offset UBO):
+// the per-material fields that do not fit the 128-byte push-constant budget
+// - the distance-fog triple, the procedural mottle pair and the near-field
+// relief overlay's triple (see MeshMaterial's appended fields; the CPU
+// rasterizer carries the same values through RasterSetup). The renderer
+// binds one block per distinct tuple with the draw's dynamic offset.
+layout(std140, set = 2, binding = 0) uniform MaterialExtension
+{
+    vec4 uFog;        // rgb fog color, a fog asymptote (0 disables)
+    vec4 uFogMottle;  // x fog scale meters, y noise scale meters, z noise strength, w unused
+    vec4 uDetail;     // x detail uv scale, y detail strength, z detail fade start meters, w detail fade end meters
+} materialExtension;
 
 layout(location = 0) out vec4 oColor;
 
@@ -265,7 +293,11 @@ vec3 giLevelIrradiance(uint levelOffset, vec3 levelAnchor, vec3 levelDims, float
 {
     const vec3 cell       = (position - levelAnchor) / levelSpacing;
     const ivec3 base      = clamp(ivec3(floor(cell)), ivec3(0.0), ivec3(levelDims) - ivec3(2.0));
-    const vec3 fraction   = clamp(cell - vec3(base), vec3(0.0), vec3(1.0));
+    // Smoothstep per axis (the DDGI probe-blend convention; the CPU twin in
+    // gi_probe_sampling.hpp carries the full rationale): C1 lattice joins so
+    // the probe grid stops reading as a world-aligned cell pattern.
+    const vec3 raw        = clamp(cell - vec3(base), vec3(0.0), vec3(1.0));
+    const vec3 fraction   = raw * raw * (3.0 - 2.0 * raw);
     // Tangent-plane anti-leak weight (the CPU twin's
     // probeTangentPlaneAlignmentFactor, in its factored form): the base
     // alignment measured against the cell's base corner plus the corner's
@@ -354,6 +386,132 @@ bool giGridIrradiance(vec3 position, vec3 normal, out vec3 giIrradiance, out flo
     return giWeight > 0.0;
 }
 
+// ---- reflection_field screen-space indirect specular -------------------------
+// Mirrors the CPU path in source/core/reflection_field_sampling.hpp exactly
+// (same projection, same gates, same renormalizing bilinear): the shaded
+// point projects through the field's own camera, the four surrounding
+// texels blend, and a texel is refused when it carries the neutral roughness
+// (no traced response) or sits outside the pixel's roughness band. An empty
+// neighborhood reports traced = false. The neutral roughness and band width
+// are the reflection_field ABI constants.
+const float kFieldNeutralRoughness = 1.0;
+const float kFieldRoughnessBand    = 0.15;
+
+vec3 sampleReflectionField(vec3 worldPosition, float pixelRoughness, out bool traced)
+{
+    traced = false;
+    if (frameData.uFieldMeta.w < 0.5 || pixelRoughness > frameData.uFieldMeta.z)
+    {
+        return vec3(0.0);
+    }
+    const vec4 clip = frameData.uFieldViewProj * vec4(worldPosition, 1.0);
+    if (clip.w <= 0.05)
+    {
+        return vec3(0.0);
+    }
+    const float width  = frameData.uFieldMeta.x;
+    const float height = frameData.uFieldMeta.y;
+    const float u = (clip.x / clip.w * 0.5 + 0.5) * width - 0.5;
+    const float v = (0.5 - clip.y / clip.w * 0.5) * height - 0.5;
+    if (u < 0.0 || v < 0.0 || u > width - 1.0 || v > height - 1.0)
+    {
+        return vec3(0.0);
+    }
+    const ivec2 base = ivec2(floor(vec2(u, v)));
+    const ivec2 far  = min(base + ivec2(1), ivec2(width, height) - ivec2(1));
+    const vec2  fraction = vec2(u, v) - vec2(base);
+
+    const vec4 t00 = texelFetch(uReflectionField, base, 0);
+    const vec4 t10 = texelFetch(uReflectionField, ivec2(far.x, base.y), 0);
+    const vec4 t01 = texelFetch(uReflectionField, ivec2(base.x, far.y), 0);
+    const vec4 t11 = texelFetch(uReflectionField, far, 0);
+
+    const bool traced00 = t00.a < kFieldNeutralRoughness && abs(t00.a - pixelRoughness) <= kFieldRoughnessBand;
+    const bool traced10 = t10.a < kFieldNeutralRoughness && abs(t10.a - pixelRoughness) <= kFieldRoughnessBand;
+    const bool traced01 = t01.a < kFieldNeutralRoughness && abs(t01.a - pixelRoughness) <= kFieldRoughnessBand;
+    const bool traced11 = t11.a < kFieldNeutralRoughness && abs(t11.a - pixelRoughness) <= kFieldRoughnessBand;
+
+    const float w00 = traced00 ? (1.0 - fraction.x) * (1.0 - fraction.y) : 0.0;
+    const float w10 = traced10 ? fraction.x * (1.0 - fraction.y) : 0.0;
+    const float w01 = traced01 ? (1.0 - fraction.x) * fraction.y : 0.0;
+    const float w11 = traced11 ? fraction.x * fraction.y : 0.0;
+    const float weightSum = w00 + w10 + w01 + w11;
+    if (weightSum <= 0.0)
+    {
+        return vec3(0.0);
+    }
+    traced = true;
+    return (t00.rgb * w00 + t10.rgb * w10 + t01.rgb * w01 + t11.rgb * w11) / weightSum;
+}
+
+// Procedural surface mottle (the CPU rasterizer's mottle_noise.hpp twin):
+// a footprint-adaptive two-octave 3D value noise that perturbs the shaded
+// albedo. The GPU evaluates the same avalanche-hash lattice; the footprint
+// floor uses the pixel's world-position derivatives (dFdx/dFdy), the CPU
+// twin's per-record estimate.
+float mottleLattice(ivec3 c)
+{
+    uint state = uint(c.x) * 0x8DA6B343u ^ uint(c.y) * 0xD816394Cu ^ uint(c.z) * 0xCB1AB31Fu;
+    state ^= state >> 15;
+    state *= 0x2C1B3C6Du;
+    state ^= state >> 12;
+    state *= 0x97A2D39Bu;
+    state ^= state >> 15;
+    return float(state & 0x00FFFFFFu) * (1.0 / 16777216.0);
+}
+
+float mottleValueNoise(vec3 p)
+{
+    const ivec3 base = ivec3(floor(p));
+    const vec3 f = p - vec3(base);
+    const vec3 fade = f * f * (3.0 - 2.0 * f);
+    const float c000 = mottleLattice(base);
+    const float c100 = mottleLattice(base + ivec3(1, 0, 0));
+    const float c010 = mottleLattice(base + ivec3(0, 1, 0));
+    const float c110 = mottleLattice(base + ivec3(1, 1, 0));
+    const float c001 = mottleLattice(base + ivec3(0, 0, 1));
+    const float c101 = mottleLattice(base + ivec3(1, 0, 1));
+    const float c011 = mottleLattice(base + ivec3(0, 1, 1));
+    const float c111 = mottleLattice(base + ivec3(1, 1, 1));
+    const float x00 = c000 + (c100 - c000) * fade.x;
+    const float x10 = c010 + (c110 - c010) * fade.x;
+    const float x01 = c001 + (c101 - c001) * fade.x;
+    const float x11 = c011 + (c111 - c011) * fade.x;
+    const float y0 = x00 + (x10 - x00) * fade.y;
+    const float y1 = x01 + (x11 - x01) * fade.y;
+    return y0 + (y1 - y0) * fade.z;
+}
+
+float mottleAlbedoModulation(vec3 worldPosition, float baseScaleMeters, float footprintMeters, float strength)
+{
+    const float scaleLow = max(baseScaleMeters, footprintMeters);
+    const float scaleHigh = max(baseScaleMeters * 0.5, footprintMeters);
+    const float n = 0.6 * mottleValueNoise(worldPosition * (1.0 / scaleLow))
+        + 0.4 * mottleValueNoise(worldPosition * (1.0 / scaleHigh));
+    return 1.0 + strength * (2.0 * n - 1.0);
+}
+
+// Analytic environment specular (pbrEnvSpecular's GLSL twin in
+// source/core/pbr_shading.hpp): the hemispheric ambient pair doubles as a
+// two-color environment radiance estimate, so every surface carries the
+// grazing-angle sky sheen that separates a rough dielectric from a
+// Lambertian shade. Formulas and constants must stay in sync with the CPU
+// twin.
+vec3 envSpecular(vec3 normal, vec3 view, float roughness, vec3 f0, float nDotV,
+    vec3 ambientSky, vec3 ambientGround, float ambientOcclusion)
+{
+    const vec3 reflected = reflect(-view, normal);
+    const float blur = roughness * roughness;
+    const float lobeUp = mix(reflected.y * 0.5 + 0.5, 0.5, blur);
+    const vec3 radiance = mix(ambientGround, ambientSky, lobeUp);
+    const vec4 fitX = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 fitY = vec4(1.0, 0.0425, 1.04, -0.04);
+    const vec4 r = vec4(roughness) * fitX + fitY;
+    const float a004 = min(r.x * r.x, exp(-9.28 * nDotV)) * r.x + r.y;
+    const vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    return radiance * (f0 * ab.x + vec3(ab.y)) * ambientOcclusion;
+}
+
 void main()
 {
     const vec3 geometryNormal = normalize(vNormal);
@@ -382,15 +540,44 @@ void main()
     {
         discard;
     }
-    const vec3  baseColor = vColor * pushData.uBaseColorFactor.rgb
-                          * baseColorSample.rgb;
+    vec3 baseColor = vColor * pushData.uBaseColorFactor.rgb
+                   * baseColorSample.rgb;
+
+    // Procedural surface mottle (the rasterizer's mottle_noise.hpp twin):
+    // the footprint-adaptive two-octave value noise at the fragment's world
+    // position multiplies the albedo. The footprint floor rides the
+    // world-position derivatives (the CPU twin's per-record estimate).
+    if (materialExtension.uFogMottle.y > 0.0 && materialExtension.uFogMottle.z > 0.0)
+    {
+        const vec3 footprintVector = max(abs(dFdx(vWorldPosition)), abs(dFdy(vWorldPosition)));
+        const float footprint = max(max(footprintVector.x, footprintVector.y), footprintVector.z);
+        baseColor *= mottleAlbedoModulation(vWorldPosition, materialExtension.uFogMottle.y, footprint,
+            materialExtension.uFogMottle.z);
+    }
 
     // Perturbed normal: decode the tangent-space map, scale the tangential
     // part by normalScale, and rotate into world space. The neutral flat
     // normal (0.5, 0.5, 1.0) decodes to (0, 0, 1) and leaves the geometry
-    // normal standing.
+    // normal standing. The near-field relief overlay (the rasterizer's
+    // MeshMaterial detail triple) perturbs the tangent-space normal first:
+    // full at the fade's start distance, gone at its end, so the ground
+    // gains real grain while the eye descends (the slope-add blend keeps
+    // the base map's larger relief standing).
     const vec3  normalMapSample = texture(uNormalTexture, vUv).xyz * 2.0 - 1.0;
-    const vec3  tangentNormal   = normalize(vec3(normalMapSample.xy * pushData.uMetallicRoughness.z, normalMapSample.z));
+    vec3        tangentNormal   = normalize(vec3(normalMapSample.xy * pushData.uMetallicRoughness.z, normalMapSample.z));
+    if (materialExtension.uDetail.x > 0.0)
+    {
+        const float pixelDistance = distance(vWorldPosition, frameData.uCameraPos.xyz);
+        const float fade = clamp((materialExtension.uDetail.w - pixelDistance)
+            / max(materialExtension.uDetail.w - materialExtension.uDetail.z, 1e-3), 0.0, 1.0);
+        if (fade > 0.0)
+        {
+            const vec2 detailUv = vUv * materialExtension.uDetail.x;
+            const vec3 detailSample = texture(uDetailNormalTexture, detailUv).xyz * 2.0 - 1.0;
+            tangentNormal = normalize(tangentNormal
+                + fade * materialExtension.uDetail.y * vec3(detailSample.xy, 0.0));
+        }
+    }
     const mat3  tbn             = tangentFrame(orientedNormal, vWorldPosition, vUv);
     const vec3  normal          = normalize(tbn * tangentNormal);
 
@@ -411,7 +598,13 @@ void main()
 
     const vec3  f0           = mix(vec3(0.04), baseColor, metallic);
     const vec3  sunRadiance  = frameData.uSunColor.rgb * frameData.uSunColor.a * frameData.uSunDirection.w;
-    const vec3  diffuse      = baseColor * (1.0 - metallic) / PI;
+    // Transparent surfaces scatter only the share they keep off the
+    // transmitted path, so the diffuse terms scale by the opacity (the
+    // pbrShade twin in source/core/pbr_shading.hpp; the transmitted share
+    // lives in the reflection field and the alpha blend, never in the
+    // surface's own diffuse response).
+    const float opacityFactor = clamp(pushData.uCloth.w, 0.0, 1.0);
+    const vec3  diffuse      = baseColor * (1.0 - metallic) / PI * opacityFactor;
 
     const vec3 sunContribution = shadeDirectLight(
         normal, view, lightDirection, sunRadiance, diffuse, f0, baseColor, roughness, sheenFactor, nDotV);
@@ -426,7 +619,7 @@ void main()
     // ambient and the probe-grid GI are diffuse integrals, so they scale by
     // (1 - metallic) exactly like the direct-lighting diffuse above
     // (pbrShade keeps the twin of this factor).
-    const vec3 diffuseAlbedo = baseColor * (1.0 - metallic);
+    const vec3 diffuseAlbedo = baseColor * (1.0 - metallic) * opacityFactor;
     const vec3 upColor   = frameData.uAmbientSky.rgb * frameData.uAmbientSky.a;
     const vec3 downColor = frameData.uAmbientGround.rgb * frameData.uAmbientSky.a;
     const vec3 hemispheric = mix(downColor, upColor, normal.y * 0.5 + 0.5) * diffuseAlbedo * occlusion;
@@ -446,7 +639,6 @@ void main()
     }
 
     vec3 color = sunContribution + ambient;
-
     // Dynamic direct lights. The loop bound uses MAX_LIGHTS (specialization
     // constant, default 32 = original). The active count breaks out early.
     const uint directLightCount = uint(clamp(frameData.uDirectLightMeta.x, 0.0, float(MAX_LIGHTS)));
@@ -490,6 +682,25 @@ void main()
             normal, view, lightDirection, radiance, diffuse, f0, baseColor, roughness, sheenFactor, nDotV);
     }
 
+    // Indirect specular (reflection_field field hook): the field texel this
+    // fragment projects into carries the expected GGX-lobe response of its
+    // material, so the add is the whole composite - the rasterizer's
+    // sampleReflectionField twin, in linear space before the tone map. Lit
+    // draws only (the software rasterizer's unlit path skips the hook).
+    // The analytic environment specular (the rasterizer's envSpecularScale
+    // handoff twin) applies wherever the field did NOT answer - the field's
+    // traced response already contains the surface's specular-environment
+    // share, and the two terms must not double.
+    bool fieldTraced = false;
+    if (pushData.uEmissive.a <= 0.5)
+    {
+        color += sampleReflectionField(vWorldPosition, roughness, fieldTraced);
+        if (!fieldTraced)
+        {
+            color += envSpecular(normal, view, roughness, f0, nDotV, upColor, downColor, occlusion);
+        }
+    }
+
     // Unlit surfaces (sky dome, sun disc) skip shading and show their
     // albedo; the flag rides on the push constants, so the branch is
     // uniform across the draw.
@@ -500,6 +711,19 @@ void main()
 
     // The surface's own light, added on top of the lit (or unlit) result.
     color += pushData.uEmissive.rgb * texture(uEmissiveTexture, vUv).rgb;
+
+    // Distance fog (MeshMaterial's fog triple, the rasterizer's twin block):
+    // per-pixel, in linear space, after every lighting and emissive term,
+    // before the output transform. The fragment's own position carries the
+    // weight, so the fog stays continuous across mesh and chunk boundaries.
+    // Unlit draws fog too (a distant emissive card fades like the terrain
+    // behind it).
+    if (materialExtension.uFog.a > 0.0)
+    {
+        const float fogWeight = materialExtension.uFog.a
+            * (1.0 - exp(-distance(vWorldPosition, frameData.uCameraPos.xyz) / materialExtension.uFogMottle.x));
+        color = mix(color, materialExtension.uFog.rgb, fogWeight);
+    }
 
     // Exposure + tone mapping. The linear-to-sRGB output transform is
     // conditional on SRGB_OUTPUT (specialization constant, default 0):
@@ -517,5 +741,15 @@ void main()
     // pipeline's SRC_ALPHA blend matches the headless rasterizer's
     // opacity-times-texel-alpha commit: foam patches and mist banks with
     // soft alpha textures fade per texel, opaque draws ignore the channel.
-    oColor = vec4(color, pushData.uCloth.w * baseColorSample.a);
+    // A transmissive surface with a traced field response commits opaque
+    // instead: the field's response already carries the interface's
+    // reflected share and the refracted transmitted share, so blending the
+    // raw background in as well would double it (the rasterizer's
+    // transmissive-commit twin).
+    float outputAlpha = pushData.uCloth.w * baseColorSample.a;
+    if (pushData.uCloth.w < 1.0 && fieldTraced)
+    {
+        outputAlpha = 1.0;
+    }
+    oColor = vec4(color, outputAlpha);
 }

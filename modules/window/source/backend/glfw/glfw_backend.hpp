@@ -58,6 +58,10 @@ public:
     void restore(WindowRecord &record) override;
     void maximize(WindowRecord &record) override;
     bool getWindowAttributes(const WindowRecord &record, WindowAttributes *outAttributes) const override;
+
+    // Refresh rate of the monitor owning the window (see WindowAttributes);
+    // the shared implementation of the attribute query above.
+    [[nodiscard]] double monitorRefreshRateHz(GLFWwindow *window) const;
     bool getContentScale(const WindowRecord &record, float *outX, float *outY) const override;
     bool rawMouseMotionSupported() const override;
 

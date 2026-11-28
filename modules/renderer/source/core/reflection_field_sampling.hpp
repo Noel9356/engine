@@ -115,8 +115,12 @@ inline PreparedReflectionField prepareReflectionField(const ReflectionField &fie
 // the scene behind it, so blending the raw background in as well would
 // double it.
 inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, const glm::vec3 &worldPosition,
-    float pixelRoughness, bool *outTraced = nullptr)
+    float pixelRoughness, bool *outTraced = nullptr, float *outCoverage = nullptr)
 {
+    if (outCoverage != nullptr)
+    {
+        *outCoverage = 0.0f;
+    }
     if (!field.valid)
     {
         return glm::vec3(0.0f);
@@ -149,8 +153,17 @@ inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, con
     const std::uint32_t y0 = static_cast<std::uint32_t>(std::floor(v));
     const std::uint32_t x1 = std::min(x0 + 1u, field.width - 1u);
     const std::uint32_t y1 = std::min(y0 + 1u, field.height - 1u);
-    const float       fx = u - static_cast<float>(x0);
-    const float       fy = v - static_cast<float>(y0);
+    // Smoothstep per axis: the field spans screen_scale screen pixels per
+    // texel, and plain bilinear weights carry each texel's diamond as a
+    // screen-aligned lattice at exactly that pitch - the blocky, gridded
+    // look a half-resolution reflection field shows on chrome, glass and
+    // water even at distance. The curve keeps the blend's endpoints while
+    // making the joins C1, rounding the texel boundaries away without
+    // blurring the traced response.
+    const float fxRaw = u - static_cast<float>(x0);
+    const float fyRaw = v - static_cast<float>(y0);
+    const float fx = fxRaw * fxRaw * (3.0f - 2.0f * fxRaw);
+    const float fy = fyRaw * fyRaw * (3.0f - 2.0f * fyRaw);
     float roughness00 = 1.0f, roughness10 = 1.0f, roughness01 = 1.0f, roughness11 = 1.0f;
     const auto texelAt = [&field](std::uint32_t x, std::uint32_t y, bool &traced, float &texelRoughness)
     {
@@ -198,6 +211,16 @@ inline glm::vec3 sampleReflectionField(const PreparedReflectionField &field, con
     if (outTraced != nullptr)
     {
         *outTraced = true;
+    }
+    // The traced footprint fraction: transmissive draws blend their traced
+    // composite against the classic alpha blend by this coverage instead of
+    // switching on `any texel survived` - a hard switch at the traced/
+    // neutral boundary shows the two very different composites side by side
+    // as faceted shards (the traced side carries the refracted background,
+    // the refused side the plain shaded surface).
+    if (outCoverage != nullptr)
+    {
+        *outCoverage = weightSum;
     }
     return (t00 * w00 + t10 * w10 + t01 * w01 + t11 * w11) / weightSum;
 }

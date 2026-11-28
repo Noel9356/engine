@@ -10,6 +10,7 @@
 #include "finite_math.hpp"
 #include "mottle_noise.hpp"
 #include "quad_shading.hpp"
+#include "../../core/ktx_texture_loader.hpp"
 #include "render_shared.hpp"
 #include "tile_bins.hpp"
 #include "wide_presentation.hpp"
@@ -1113,6 +1114,10 @@ void processScalarCameraPixel(std::uint8_t *pixel, std::uint32_t x, std::uint32_
     float normalizedY, float contrast, float vignette, float grain, std::uint32_t frameSeed, const float *decode)
 {
     glm::vec3 linear(decode[pixel[0]], decode[pixel[1]], decode[pixel[2]]);
+    // Shaping anchor: the PRE-contrast decoded red channel (the wide path's
+    // decodedLane domain), so both presentation paths agree bit for bit
+    // regardless of the contrast/vignette/grain settings applied below.
+    const float decodedRed = decode[pixel[0]];
     constexpr float kPivot = 0.18f;
     if (contrast != 1.0f)
     {
@@ -1160,9 +1165,17 @@ void processScalarCameraPixel(std::uint8_t *pixel, std::uint32_t x, std::uint32_
         26, 12, 44, 4, 36, 14, 46, 6, 38, 60, 28, 52, 20, 62, 30, 54, 22, 3, 35, 11, 43, 1, 33, 9,
         41, 51, 19, 59, 27, 49, 17, 57, 25, 15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53,
         21};
+    // Luminance-shaped amplitude: the full half-quantum offset stays where
+    // banding lives (the bright smooth gradients the dither exists for) and
+    // scales down toward black, where a half-quantum step is a large
+    // RELATIVE jump and the 8x8 lattice reads as a dim dot grid on near-black
+    // faces. The 0.15 floor keeps a whisper of decorrelation in the deepest
+    // shadows so crushed gradients still dither, at an amplitude (under a
+    // tenth of a quantum) no eye traces as a pattern.
+    const float ditherShaping = glm::clamp(0.15f + decodedRed * 71.0f, 0.15f, 1.0f);
     const float dither
         = (static_cast<float>(kBayer8x8[((y & 7u) << 3u) | (x & 7u)]) * (1.0f / 63.0f) - 0.5f)
-            * (1.0f / 255.0f);
+            * (1.0f / 255.0f) * ditherShaping;
     for (std::uint32_t channel = 0; channel < 3; ++channel)
     {
         const float clamped
@@ -1270,9 +1283,14 @@ void HeadlessBackend::applyCameraResponse(const window::SurfacePixels &pixels, s
                             gain *= 1.0f + grain * (0.35f + 0.65f * midtone) * noise;
                         }
                         gainLane[lane] = gain;
+                        // Luminance-shaped amplitude (the scalar path's twin):
+                        // the decoded lane values are LINEAR; the shaping uses
+                        // the same linear ramp so both paths agree bit for bit.
+                        const float shaping
+                            = glm::clamp(0.15f + decodedLane[0][lane] * 71.0f, 0.15f, 1.0f);
                         ditherLane[lane] = (static_cast<float>(kBayer8x8[((y & 7u) << 3u) | (laneX & 7u)])
                                 * (1.0f / 63.0f) - 0.5f)
-                            * (1.0f / 255.0f);
+                            * (1.0f / 255.0f) * shaping;
                     }
                     // Contrast pivot as slope/intercept; the grain's gain
                     // rides the same multiply (the scalar path applies it to
@@ -1773,6 +1791,11 @@ void HeadlessBackend::recordSunShadowCaster(MeshHandle mesh, const float *modelM
     sunshadows::SunShadowCaster caster;
     caster.mesh = mesh;
     std::memcpy(caster.transform, modelMatrix, sizeof(caster.transform));
+    // Alpha-cutout draws (vegetation cards) keep their sprite mask: the
+    // caster rasterizer samples the card's alpha so the shadow is the
+    // silhouette the sun sees, not the full quad.
+    caster.alphaCutoff = material.alphaCutoff;
+    caster.alphaTexture = material.baseColorTexture;
     sunShadowCasters_.push_back(caster);
 }
 
@@ -1800,6 +1823,12 @@ std::uint64_t HeadlessBackend::sunShadowCastersHash() const
     for (const sunshadows::SunShadowCaster &caster : sunShadowCasters_)
     {
         hash ^= caster.mesh;
+        hash *= 0x00000100000001B3ull;
+        hash ^= caster.alphaTexture;
+        hash *= 0x00000100000001B3ull;
+        std::uint32_t cutoffBits = 0;
+        std::memcpy(&cutoffBits, &caster.alphaCutoff, sizeof(cutoffBits));
+        hash ^= cutoffBits;
         hash *= 0x00000100000001B3ull;
         // The caster's geometry generation, not just its (mesh, transform)
         // pair: updateMeshVertices replaces a mesh's positions without
@@ -1873,6 +1902,24 @@ std::vector<sunshadows::SunShadowGeometry> HeadlessBackend::sunShadowGeometries(
         geometry.indices              = mesh.indices.data();
         geometry.indexCount           = mesh.indices.size();
         geometry.transformColumnMajor = caster.transform;
+        // Alpha-cutout resolution: the texture table lookup mirrors the mesh
+        // lookup (a destroyed texture drops the cutout, and the hash above
+        // already keys the rebuild on the swap). The RGBA8 upload copy is the
+        // cutout mask the color path's own alpha test reads.
+        if (caster.alphaCutoff > 0.0f && caster.alphaTexture != invalidTexture)
+        {
+            const auto textureFound = textures.find(caster.alphaTexture);
+            if (textureFound != textures.end() && textureFound->second.width > 0
+                && textureFound->second.height > 0 && textureFound->second.pixels.size()
+                    >= static_cast<std::size_t>(textureFound->second.width) * textureFound->second.height * 4u)
+            {
+                geometry.uvs         = mesh.uvs.data();
+                geometry.alphaTexels = textureFound->second.pixels.data();
+                geometry.alphaWidth  = textureFound->second.width;
+                geometry.alphaHeight = textureFound->second.height;
+                geometry.alphaCutoff = caster.alphaCutoff;
+            }
+        }
         const glm::mat4 model         = glm::make_mat4(caster.transform);
         // The mesh's local bounds box (center +/- radius, the bounding
         // sphere's conservative box) transformed by the model matrix: exact
@@ -2384,6 +2431,97 @@ bool HeadlessBackend::createTexture(TextureHandle id, const TextureDescription &
             reportError(error, RenderError::CreationFailed);
             return false;
         }
+        textures.emplace(id, std::move(texture));
+        reportError(error, RenderError::None);
+        return true;
+    }
+    catch (const std::bad_alloc &)
+    {
+        reportError(error, RenderError::CreationFailed);
+        return false;
+    }
+}
+
+// Block textures (the KTX path): bcdec software-decodes every level into
+// the RGBA8 + float-RGB layout createTexture builds, with the mip chain
+// coming from the file's own levels (better minification than the box
+// filter and byte-identical to the Vulkan path's sampling).
+BlockTextureFormatSupport HeadlessBackend::blockFormatSupport() const
+{
+    // Every format decodes on the CPU, so all are accepted regardless of
+    // GPU support; the module core still prefers the native GPU path.
+    BlockTextureFormatSupport support;
+    support.bc1 = support.bc3 = support.bc4 = support.bc5 = support.bc7 = true;
+    return support;
+}
+
+bool HeadlessBackend::createBlockTexture(TextureHandle id, const BlockTextureDescription &description,
+    RenderError *error)
+{
+    if (description.pixels == nullptr || description.levelBytes == nullptr || description.width == 0
+        || description.height == 0 || description.levelCount == 0)
+    {
+        reportError(error, RenderError::InvalidTexture);
+        return false;
+    }
+    if (textures.find(id) != textures.end())
+    {
+        reportError(error, RenderError::CreationFailed);
+        return false;
+    }
+    try
+    {
+        HeadlessTexture texture;
+        texture.width   = description.width;
+        texture.height  = description.height;
+        texture.filter  = description.filter;
+        texture.address = description.address;
+        const bool pow2Width  = (description.width & (description.width - 1u)) == 0u;
+        const bool pow2Height = (description.height & (description.height - 1u)) == 0u;
+        texture.wrapMaskX  = pow2Width ? description.width - 1u : 0u;
+        texture.wrapMaskY  = pow2Height ? description.height - 1u : 0u;
+        texture.repeatPow2 = texture.address == TextureAddress::Repeat && pow2Width && pow2Height;
+
+        // Level 0 fills pixels/pixelsRGB; levels 1..n come from the file.
+        const std::uint8_t *levelBlocks = description.pixels;
+        std::vector<std::uint8_t> decoded;
+        decodeBlockLevelToRgba(
+            levelBlocks, description.format, description.width, description.height, decoded);
+        levelBlocks += static_cast<std::size_t>(description.levelBytes[0]);
+        texture.pixels = decoded;
+        {
+            const std::size_t pc = static_cast<std::size_t>(description.width) * description.height;
+            texture.pixelsRGB.resize(pc * 3);
+            constexpr float inv = 1.0f / 255.0f;
+            for (std::size_t i = 0; i < pc; ++i)
+            {
+                texture.pixelsRGB[i * 3]     = static_cast<float>(decoded[i * 4]) * inv;
+                texture.pixelsRGB[i * 3 + 1] = static_cast<float>(decoded[i * 4 + 1]) * inv;
+                texture.pixelsRGB[i * 3 + 2] = static_cast<float>(decoded[i * 4 + 2]) * inv;
+            }
+        }
+        std::vector<HeadlessTexture::MipLevel> chain;
+        for (std::uint32_t level = 1; level < description.levelCount; ++level)
+        {
+            const std::uint32_t levelWidth  = std::max(1u, description.width >> level);
+            const std::uint32_t levelHeight = std::max(1u, description.height >> level);
+            std::vector<std::uint8_t> levelRgba;
+            decodeBlockLevelToRgba(levelBlocks, description.format, levelWidth, levelHeight, levelRgba);
+            levelBlocks += static_cast<std::size_t>(description.levelBytes[level]);
+            HeadlessTexture::MipLevel mip;
+            mip.width  = levelWidth;
+            mip.height = levelHeight;
+            mip.rgb.assign(static_cast<std::size_t>(levelWidth) * levelHeight * 3, 0.0f);
+            constexpr float inv = 1.0f / 255.0f;
+            for (std::size_t i = 0; i < static_cast<std::size_t>(levelWidth) * levelHeight; ++i)
+            {
+                mip.rgb[i * 3]     = static_cast<float>(levelRgba[i * 4]) * inv;
+                mip.rgb[i * 3 + 1] = static_cast<float>(levelRgba[i * 4 + 1]) * inv;
+                mip.rgb[i * 3 + 2] = static_cast<float>(levelRgba[i * 4 + 2]) * inv;
+            }
+            chain.push_back(std::move(mip));
+        }
+        texture.mipChain = std::move(chain);
         textures.emplace(id, std::move(texture));
         reportError(error, RenderError::None);
         return true;
@@ -3702,6 +3840,13 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
     outSetup.fogColor                = glm::max(glm::make_vec3(material.fogColor), glm::vec3(0.0f));
     outSetup.fogScaleMeters          = std::max(material.fogScaleMeters, 1.0f);
     outSetup.fogAsymptote            = glm::clamp(material.fogAsymptote, 0.0f, 1.0f);
+    outSetup.detailNormalMap         = material.detailNormalTexture != invalidTexture
+            ? mapFor(material.detailNormalTexture, flatNormal_)
+            : nullptr;
+    outSetup.detailUvScale           = std::max(material.detailUvScale, 0.0f);
+    outSetup.detailFadeStartMeters   = std::max(material.detailFadeStartMeters, 0.0f);
+    outSetup.detailFadeEndMeters     = std::max(material.detailFadeEndMeters, outSetup.detailFadeStartMeters + 0.1f);
+    outSetup.detailStrength          = glm::clamp(material.detailStrength, 0.0f, 4.0f);
 
     outSetup.hasBaseColorMap         = outSetup.baseColorMap != &neutralWhite_;
     outSetup.hasNormalMap            = outSetup.normalMap != &flatNormal_;
@@ -3711,6 +3856,7 @@ bool HeadlessBackend::prepareRasterization(const HeadlessMesh &mesh, const float
         = outSetup.emissiveColor.x != 0.0f || outSetup.emissiveColor.y != 0.0f || outSetup.emissiveColor.z != 0.0f;
     outSetup.hasOcclusion
         = !outSetup.unlit && outSetup.occlusionStrength != 0.0f && outSetup.occlusionMap != &neutralWhite_;
+    outSetup.hasDetailNormal = !outSetup.unlit && outSetup.detailNormalMap != nullptr && outSetup.detailUvScale > 0.0f;
 
     outSetup.fallbackTangentNormal = glm::vec3(0.0f, 0.0f, 1.0f);
     if (!outSetup.unlit && !outSetup.hasNormalMap)
@@ -4328,6 +4474,7 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                         // site only sets it when the field sample returned a
                         // traced response.
                         bool bandFieldTraced = false;
+                        float bandFieldCoverage = 0.0f;
                         if (setup.fur)
                         {
                             // Jittered strand field (furStrandField <->
@@ -4415,13 +4562,42 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                     normal = -normal;
                                 }
                             }
-                            if (hasNormalMap)
+                            if (hasNormalMap || setup.hasDetailNormal)
                             {
-                                const glm::vec3 normalMapSample
-                                    = normalMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY) * 2.0f - 1.0f;
-                                const glm::vec3 tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
-                                    normalMapSample.y * normalScale,
-                                    normalMapSample.z));
+                                // Near-field relief overlay (MeshMaterial's
+                                // detail triple; see shadeTrianglePixel's
+                                // twin block): the finer-tiling normal map
+                                // perturbs the tangent-space normal, faded by
+                                // the sample's camera distance.
+                                glm::vec3 tangentNormal = setup.fallbackTangentNormal;
+                                if (hasNormalMap)
+                                {
+                                    const glm::vec3 normalMapSample
+                                        = normalMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY) * 2.0f - 1.0f;
+                                    tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
+                                        normalMapSample.y * normalScale,
+                                        normalMapSample.z));
+                                }
+                                if (setup.hasDetailNormal)
+                                {
+                                    const float pixelDistance = glm::length(interpolatedPosition - cameraPosition_);
+                                    const float fade = glm::clamp(
+                                        (setup.detailFadeEndMeters - pixelDistance)
+                                            / glm::max(setup.detailFadeEndMeters - setup.detailFadeStartMeters,
+                                                1.0e-3f),
+                                        0.0f, 1.0f);
+                                    if (fade > 0.0f)
+                                    {
+                                        const glm::vec2 detailUv = interpolatedUv * setup.detailUvScale;
+                                        const glm::vec3 detailSample = setup.detailNormalMap->sampleTrilinear(
+                                            detailUv.x, detailUv.y,
+                                            uvDerivativeX * setup.detailUvScale,
+                                            uvDerivativeY * setup.detailUvScale) * 2.0f - 1.0f;
+                                        tangentNormal = glm::normalize(tangentNormal
+                                            + fade * setup.detailStrength
+                                                * glm::vec3(detailSample.x, detailSample.y, 0.0f));
+                                    }
+                                }
                                 // The (possibly flipped) oriented normal is the
                                 // TBN's third axis, exactly like mesh.frag builds
                                 // its tangent frame from the flipped geometry
@@ -4488,6 +4664,21 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 gatherSample.valid = true;
                                 effectiveGiSample  = &gatherSample;
                             }
+                            // Indirect specular handoff (reflection_field
+                            // field hook; see shadeTrianglePixel's twin
+                            // block): the sample runs BEFORE pbrShade so a
+                            // traced answer scales the analytic environment
+                            // specular out - the field's response already
+                            // contains the surface's specular-environment
+                            // share, and the two terms must not double.
+                            bool inlineFieldTraced = false;
+                            float inlineFieldCoverage = 0.0f;
+                            glm::vec3 inlineFieldRadiance(0.0f);
+                            if (preparedReflectionField_.valid)
+                            {
+                                inlineFieldRadiance = sampleReflectionField(preparedReflectionField_,
+                                    interpolatedPosition, roughness, &inlineFieldTraced, &inlineFieldCoverage);
+                            }
                             shaded = pbrShade(normal,
                                 interpolatedPosition,
                                 cameraPosition_,
@@ -4502,18 +4693,28 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                 directLights_.data(),
                                 static_cast<std::uint32_t>(directLights_.size()),
                                 effectiveGiSample == nullptr && preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
+                                setup.opacity,
                                 setup.sheenFactor,
-                                effectiveGiSample);
+                                effectiveGiSample,
+                                inlineFieldTraced ? 0.0f : 1.0f);
                             // Indirect specular (reflection_field field hook):
                             // the field texel this pixel projects into carries
                             // the expected GGX-lobe response of its material,
                             // so the add is the whole composite (linear space,
                             // before tone mapping - see shadeTrianglePixel's
                             // twin of this block).
-                            if (preparedReflectionField_.valid)
+                            // bandFieldTraced follows the SAMPLE's resolution,
+                            // not the field's validity: a valid field whose
+                            // footprint at this pixel is entirely neutral
+                            // (never traced here) must fall back to the classic
+                            // blend - committing the plain shaded color
+                            // directly showed those pixels as opaque islands
+                            // inside the transmissive surface.
+                            bandFieldTraced = inlineFieldTraced;
+                            bandFieldCoverage = inlineFieldCoverage;
+                            if (inlineFieldTraced)
                             {
-                                shaded += sampleReflectionField(
-                                    preparedReflectionField_, interpolatedPosition, roughness, &bandFieldTraced);
+                                shaded += inlineFieldRadiance;
                             }
                             }
                         }
@@ -4619,16 +4820,14 @@ void HeadlessBackend::rasterizeTriangles(const HeadlessMesh &mesh, const RasterS
                                     continue;
                                 }
                             }
-                            if (bandFieldTraced)
-                            {
-                                // Transmissive commit: the field's response
-                                // carries the interface's reflected share and
-                                // the refracted transmitted share, so the
-                                // shaded result commits directly (blending the
-                                // background in too would double it).
-                                *reinterpret_cast<std::uint32_t *>(pixel) = encodeColorRgba(shaded);
-                            }
-                            else
+                            // Transmissive commit, unified with the classic
+                            // blend (the tile path's twin comment carries the
+                            // rationale): the shaded value - analytic plus the
+                            // traced response when the footprint resolved one -
+                            // composites at the material's opacity, keeping the
+                            // opaque pass's background (a pool floor and its
+                            // caustic net) visible through the interface.
+                            if (true)
                             {
                                 // No traced response (outside the traced
                                 // roughness band, or no reflection module):
@@ -5099,7 +5298,7 @@ bool HeadlessBackend::resolveGiAmbient(const glm::vec3 &position, const glm::vec
 }
 
 glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const TileBinRecord &record, float weightA,
-    float weightB, float inverseWA, float inverseWB, float inverseWC, bool *outFieldTraced,
+    float weightB, float inverseWA, float inverseWB, float inverseWC, bool *outFieldTraced, float *outFieldCoverage,
     const GiAmbientSample *giSample, const glm::vec3 *interpolatedPair, const glm::vec3 *geometryNormalPair) const
 {
     const RasterVertex &cornerA = record.corners[0];
@@ -5125,6 +5324,7 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
     const bool        hasEmissiveMap          = setup.hasEmissiveMap;
     const glm::vec3   emissiveColor           = setup.emissiveColor;
     const HeadlessTexture *emissiveMap        = setup.emissiveMap;
+    const HeadlessTexture *detailNormalMap    = setup.detailNormalMap;
     const glm::vec3   cameraPosition          = cameraPosition_;
     const glm::vec3   lightDirection          = lightDirection_;
     glm::vec3         sunRadiance             = sunRadiance_;
@@ -5200,7 +5400,9 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
 
         // Without a normal map the surface normal IS the interpolated
         // geometry normal: skip the TBN construction and its per-pixel
-        // normalize (the common case for colored/vertex-lit parts).
+        // normalize (the common case for colored/vertex-lit parts). The
+        // detail overlay needs the TBN too, so it keeps the construction
+        // alive even on otherwise unmapped draws.
         glm::vec3 normal = geometryNormal;
         // Two-sided draws (cloth sheets, flags): flip the normal toward the
         // viewer on back-facing fragments before the TBN is built - the
@@ -5213,12 +5415,40 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
                 normal = -normal;
             }
         }
-        if (hasNormalMap)
+        if (hasNormalMap || setup.hasDetailNormal)
         {
-            const glm::vec3 normalMapSample = normalMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY) * 2.0f - 1.0f;
-            const glm::vec3 tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
-                normalMapSample.y * normalScale,
-                normalMapSample.z));
+            // Near-field relief overlay (MeshMaterial's detail triple): the
+            // finer-tiling normal map perturbs the tangent-space normal,
+            // faded by the sample's camera distance so the grain appears as
+            // the eye descends (full at detailFadeStartMeters, gone at
+            // detailFadeEndMeters; the slope-add blend keeps the base map's
+            // larger relief standing). mesh.frag keeps the twin block.
+            glm::vec3 tangentNormal = setup.fallbackTangentNormal;
+            if (hasNormalMap)
+            {
+                const glm::vec3 normalMapSample = normalMap->sampleTrilinear(interpolatedUv.x, interpolatedUv.y, uvDerivativeX, uvDerivativeY) * 2.0f - 1.0f;
+                tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
+                    normalMapSample.y * normalScale,
+                    normalMapSample.z));
+            }
+            if (setup.hasDetailNormal)
+            {
+                const float pixelDistance = glm::length(interpolatedPosition - cameraPosition);
+                const float fade = glm::clamp(
+                    (setup.detailFadeEndMeters - pixelDistance)
+                        / glm::max(setup.detailFadeEndMeters - setup.detailFadeStartMeters, 1.0e-3f),
+                    0.0f, 1.0f);
+                if (fade > 0.0f)
+                {
+                    const glm::vec2 detailUv = interpolatedUv * setup.detailUvScale;
+                    const glm::vec3 detailSample
+                        = detailNormalMap->sampleTrilinear(detailUv.x, detailUv.y,
+                            uvDerivativeX * setup.detailUvScale, uvDerivativeY * setup.detailUvScale) * 2.0f
+                        - 1.0f;
+                    tangentNormal = glm::normalize(tangentNormal
+                        + fade * setup.detailStrength * glm::vec3(detailSample.x, detailSample.y, 0.0f));
+                }
+            }
             // The (possibly flipped) oriented normal is the TBN's third
             // axis, matching mesh.frag's flipped-geometry-normal frame.
             const glm::mat3 tbn(tangentScaled, bitangentScaled, normal);
@@ -5277,6 +5507,20 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
             gatherSample.valid = true;
             effectiveGiSample  = &gatherSample;
         }
+        // Indirect specular handoff (reflection_field field hook): the field
+        // texel this pixel projects into carries the expected GGX-lobe
+        // response of its material. The sample runs BEFORE pbrShade so a
+        // traced answer can scale the analytic environment specular out -
+        // the field's response already contains the surface's
+        // specular-environment share, and the two terms must not double.
+        bool fieldTraced = false;
+        float fieldCoverage = 0.0f;
+        glm::vec3 fieldRadiance(0.0f);
+        if (preparedReflectionField_.valid)
+        {
+            fieldRadiance = sampleReflectionField(preparedReflectionField_, interpolatedPosition, roughness,
+                &fieldTraced, &fieldCoverage);
+        }
         shaded = pbrShade(normal,
             interpolatedPosition,
             cameraPosition,
@@ -5291,25 +5535,24 @@ glm::vec3 HeadlessBackend::shadeTrianglePixel(const RasterSetup &setup, const Ti
             lights,
             lightCount,
             effectiveGiSample == nullptr && preparedProbeGrid_.valid ? &preparedProbeGrid_ : nullptr,
+            setup.opacity,
             setup.sheenFactor,
-            effectiveGiSample);
+            effectiveGiSample,
+            fieldTraced ? 0.0f : 1.0f);
 
-        // Indirect specular (reflection_field field hook): the field texel
-        // this pixel projects into carries the expected GGX-lobe response of
-        // its material, so the add is the whole composite. Linear space, per
-        // the module's estimator contract; tone mapping happens below. The
-        if (preparedReflectionField_.valid)
+        // The traced response adds after the analytic shading (linear space,
+        // per the module's estimator contract; tone mapping happens below).
+        if (fieldTraced)
         {
-            bool fieldTraced = false;
-            shaded += sampleReflectionField(preparedReflectionField_, interpolatedPosition, roughness, &fieldTraced);
-            if (outFieldTraced != nullptr)
-            {
-                *outFieldTraced = fieldTraced;
-            }
+            shaded += fieldRadiance;
         }
-        else if (outFieldTraced != nullptr)
+        if (outFieldTraced != nullptr)
         {
-            *outFieldTraced = false;
+            *outFieldTraced = fieldTraced;
+        }
+        if (outFieldCoverage != nullptr)
+        {
+            *outFieldCoverage = fieldCoverage;
         }
     }
 
@@ -5463,10 +5706,15 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
     // draws whose shading normal IS the interpolated geometry normal can
     // share a cached sample (a normal map perturbs it per pixel, a two-sided
     // draw flips it on back-facing fragments; unlit and fur draws never
-    // consult the probe grid). The field cache applies to every lit draw:
-    // its gates (roughness agreement, position tolerance) refuse any sample
-    // the pixel's own material would answer differently.
+    // consult the probe grid). The amortization serves the PROBE walk: its
+    // per-call cost is what a 4x4-sample block shares. Under a gather field
+    // the ambient sample is the field's own bilinear texel read - cheap
+    // enough that per-pixel beats the cache, whose quad-tier reuse would
+    // quantize the field's per-pixel variation into 2x2-pixel steps (the
+    // dot lattice dark faces showed wherever the field's temporal history
+    // differed between neighboring quads).
     const bool giCacheEligible = tiles != nullptr && tiles->gi != nullptr && preparedProbeGrid_.valid
+        && !preparedGatherField_.valid
         && !setup.unlit && !setup.fur && !setup.hasNormalMap && !setup.doubleSided;
     GiTileCache *const tileCache = giCacheEligible ? tiles->gi : nullptr;
     // The interpolated surface pair is computed once per covered pixel and
@@ -5595,9 +5843,10 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                         giSample = &quadSample;
                     }
                 }
+                float fieldCoverage = 0.0f;
                 const glm::vec3 shaded
                     = shadeTrianglePixel(setup, record, weightA, weightB, inverseWA, inverseWB, inverseWC,
-                        &fieldTraced, giSample, positionHint, geometryHint);
+                        &fieldTraced, &fieldCoverage, giSample, positionHint, geometryHint);
 
                 if (setup.transparent)
                 {
@@ -5614,20 +5863,22 @@ bool HeadlessBackend::rasterizeFanRecord(const RasterSetup &setup, const TileBin
                     const glm::vec2 transparentUv = transparentA * record.corners[0].uv
                         + transparentB * record.corners[1].uv + transparentC * record.corners[2].uv;
                     std::uint8_t *pixel = colorBuffer + pixelIndex * 4;
-                    if (fieldTraced)
-                    {
-                        // Transmissive commit: the reflection field's response
-                        // at this pixel already contains what the surface
-                        // shows of the scene behind it (the reflected share
-                        // off the interface plus the transmitted share
-                        // refracted through it), so the shaded result commits
-                        // directly - blending the raw background in as well
-                        // would show the scene behind twice. Depth writes stay
-                        // off: co-transmissive surfaces stack through the
-                        // field's chains, not through occlusion.
-                        *reinterpret_cast<std::uint32_t *>(pixel) = encodeColorRgba(shaded);
-                    }
-                    else
+                    // Transmissive commit, unified with the classic blend: the
+                    // shaded value (analytic, plus the reflection field's
+                    // traced response when the footprint resolved one) blends
+                    // over the framebuffer at the material's opacity, exactly
+                    // like the untraced path below. Replacing the background
+                    // outright with the traced response used to hide
+                    // everything the opaque pass had already drawn under the
+                    // interface - a pool's floor and its caustic net - behind
+                    // an opaque-looking sheet; at opacity o the composite is
+                    // o*(analytic + traced share) + (1-o)*background, which
+                    // keeps the transmitted floor visible while the traced
+                    // share adds the interface's reflected and refracted
+                    // light. Depth writes stay off: co-transmissive surfaces
+                    // stack through the field's chains, not through
+                    // occlusion.
+                    if (true)
                     {
                         // No traced response here (the surface is outside the
                         // traced roughness band, or the reflection module is
@@ -5757,10 +6008,15 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     // draws whose shading normal IS the interpolated geometry normal can
     // share a cached sample (a normal map perturbs it per pixel, a two-sided
     // draw flips it on back-facing fragments; unlit and fur draws never
-    // consult the probe grid). The field cache applies to every lit draw:
-    // its gates (roughness agreement, position tolerance) refuse any sample
-    // the pixel's own material would answer differently.
+    // consult the probe grid). The amortization serves the PROBE walk: its
+    // per-call cost is what a 4x4-sample block shares. Under a gather field
+    // the ambient sample is the field's own bilinear texel read - cheap
+    // enough that per-pixel beats the cache, whose quad-tier reuse would
+    // quantize the field's per-pixel variation into 2x2-pixel steps (the
+    // dot lattice dark faces showed wherever the field's temporal history
+    // differed between neighboring quads).
     const bool giCacheEligible = tiles != nullptr && tiles->gi != nullptr && preparedProbeGrid_.valid
+        && !preparedGatherField_.valid
         && !setup.unlit && !setup.fur && !setup.hasNormalMap && !setup.doubleSided;
     GiTileCache *const tileCache = giCacheEligible ? tiles->gi : nullptr;
     // The interpolated surface pair is computed once per covered pixel and
@@ -5803,8 +6059,16 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     // Normal-mapped lit lanes fetch the map and build the TBN in the run loop
     // (shadeTrianglePixel's exact normal chain, per lane); the kernel then
     // lights the finished normals. Unlit lanes never fetch (the per-sample
-    // path only reads the map inside !unlit).
+    // path only reads the map inside !unlit). The detail overlay activates
+    // the same lane chain: its finer-tiling normal map needs the TBN even on
+    // draws without a base normal map.
     const bool normalMapped = setup.hasNormalMap && !setup.unlit;
+    const bool detailOverlay = setup.hasDetailNormal;
+    const HeadlessTexture *const detailNormalMap = setup.detailNormalMap;
+    const float detailUvScale = setup.detailUvScale;
+    const float detailFadeStart = setup.detailFadeStartMeters;
+    const float detailFadeEnd = setup.detailFadeEndMeters;
+    const float detailStrength = setup.detailStrength;
     const HeadlessTexture *const normalMap = setup.normalMap;
     const float normalScale = setup.normalScale;
     const glm::vec3 tangentScaled = record.tangent * record.tangentInverseMax;
@@ -5812,7 +6076,7 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     const bool hasMetallicRoughnessMap = setup.hasMetallicRoughnessMap;
     const bool hasOcclusion = setup.hasOcclusion;
     const bool hasEmissiveMap = setup.hasEmissiveMap;
-    const bool anySampledMap = hasBaseColorMap || normalMapped || hasMetallicRoughnessMap || hasOcclusion || hasEmissiveMap;
+    const bool anySampledMap = hasBaseColorMap || normalMapped || detailOverlay || hasMetallicRoughnessMap || hasOcclusion || hasEmissiveMap;
     shadingrun::RunContext runContext;
     runContext.cameraPosition  = cameraPosition_;
     runContext.lightDirection  = lightDirection_;
@@ -5824,7 +6088,7 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     runContext.doubleSided     = setup.doubleSided;
     runContext.albedoFilled    = hasBaseColorMap || noiseActive;
     runContext.unlit           = setup.unlit;
-    runContext.normalMapped    = normalMapped;
+    runContext.normalMapped    = normalMapped || detailOverlay;
     runContext.exposure        = environment_.exposure;
     runContext.toneMapping     = environment_.toneMapping;
     // The reflection-field response and emissive add in LINEAR space (the
@@ -5843,40 +6107,27 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
         if (setup.transparent)
         {
             std::uint8_t *pixel = colorBuffer + index * 4;
-            if (sampleFieldTraced)
+            // Transmissive commit, unified with the classic blend (the tile
+            // path's twin comment carries the full rationale): the shaded
+            // value - analytic, plus the reflection field's traced response
+            // when the footprint resolved one - composites at the material's
+            // opacity, so the opaque pass's background (a pool floor and its
+            // caustic net) stays visible through the interface instead of
+            // hiding behind the traced response rendered as an opaque sheet.
+            // Run records never carry a base-color map (recordRunsEligible
+            // keeps textured transparent draws on the per-sample cores), so
+            // the blend factor is the material's opacity alone; the skip
+            // below the 1/255 alpha threshold mirrors the per-sample cores so
+            // the same draw's tail columns and its run lanes agree.
+            static_cast<void>(sampleFieldTraced);
+            if (setup.opacity > 0.0039f)
             {
-                // Transmissive commit: the reflection field's response at
-                // this pixel already contains what the surface shows of the
-                // scene behind it (the reflected share off the interface plus
-                // the transmitted share refracted through it), so the shaded
-                // result commits directly - blending the raw background in
-                // as well would show the scene behind twice. Depth writes
-                // stay off: co-transmissive surfaces stack through the
-                // field's chains, not through occlusion.
-                *reinterpret_cast<std::uint32_t *>(pixel) = encodeColorRgba(shaded);
-            }
-            else
-            {
-                // No traced response here (the surface is outside the traced
-                // roughness band, or the reflection module is absent): the
-                // classic alpha blend over the framebuffer. Tile ownership
-                // keeps the per-pixel order equal to the submission order, so
-                // co-transparent surfaces stack far-to-near exactly as the
-                // sequential path blends them. Run records never carry a
-                // base-color map (recordRunsEligible keeps textured
-                // transparent draws on the per-sample cores), so the blend
-                // factor is the material's opacity alone; the skip below the
-                // 1/255 alpha threshold mirrors the per-sample cores so the
-                // same draw's tail columns and its run lanes agree.
-                if (setup.opacity > 0.0039f)
-                {
-                    const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
-                    const float     oneMinus = 1.0f - setup.opacity;
-                    pixel[0] = toByte(encoded.x * setup.opacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
-                    pixel[1] = toByte(encoded.y * setup.opacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
-                    pixel[2] = toByte(encoded.z * setup.opacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
-                    pixel[3] = 255;
-                }
+                const glm::vec3 encoded = fastSrgbEncode(glm::max(shaded, glm::vec3(0.0f)));
+                const float     oneMinus = 1.0f - setup.opacity;
+                pixel[0] = toByte(encoded.x * setup.opacity + static_cast<float>(pixel[0]) / 255.0f * oneMinus);
+                pixel[1] = toByte(encoded.y * setup.opacity + static_cast<float>(pixel[1]) / 255.0f * oneMinus);
+                pixel[2] = toByte(encoded.z * setup.opacity + static_cast<float>(pixel[2]) / 255.0f * oneMinus);
+                pixel[3] = 255;
             }
         }
         else
@@ -5891,10 +6142,16 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
     };
 
     // The run path's per-lane epilogue: reflection field, emissive, tone map,
-    // commit (the per-sample path's tail, per lane).
+    // commit (the per-sample path's tail, per lane). envSpecular is the
+    // kernel's exported analytic environment specular for this lane: when the
+    // traced reflection field answers, its response REPLACES the term (the
+    // field already carries the surface's specular-environment share), so the
+    // epilogue subtracts it before adding the traced radiance - the per-sample
+    // path's envSpecularScale handoff, in subtract form.
     const auto commitRunLane = [&](const glm::vec3 &shaded, float sampleDepth, std::size_t index,
         const float laneWeightA_, const float laneWeightB_, const float runRoughness, const glm::vec2 &laneUv,
-        const glm::vec2 &laneUvDerivativeX, const glm::vec2 &laneUvDerivativeY)
+        const glm::vec2 &laneUvDerivativeX, const glm::vec2 &laneUvDerivativeY,
+        const glm::vec3 &envSpecular = glm::vec3(0.0f))
     {
         glm::vec3 shadedOut = shaded;
         bool      sampleFieldTraced = false;
@@ -5902,7 +6159,8 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
         {
             // The reflection field's add is the whole composite (see the
             // per-sample path); the lane's perspective-correct position feeds
-            // the field sample.
+            // the field sample. A traced answer replaces the analytic
+            // environment specular the kernel already folded in.
             const float weightC = 1.0f - laneWeightA_ - laneWeightB_;
             const float inverseWSum = laneWeightA_ * inverseWA + laneWeightB_ * inverseWB + weightC * inverseWC;
             const float inversePerspective = 1.0f / inverseWSum;
@@ -5913,7 +6171,12 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                 + correctedC * cornerC.worldPosition;
             const float roughnessClamped = std::clamp(runRoughness, minimumRoughness, 1.0f);
             bool traced = false;
-            shadedOut += sampleReflectionField(preparedReflectionField_, pixelPosition, roughnessClamped, &traced);
+            const glm::vec3 fieldRadiance
+                = sampleReflectionField(preparedReflectionField_, pixelPosition, roughnessClamped, &traced);
+            if (traced)
+            {
+                shadedOut += fieldRadiance - envSpecular;
+            }
             sampleFieldTraced = traced;
         }
         if (setup.hasEmissive)
@@ -6334,13 +6597,15 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                 __m512 geometryNormalZ = rawNormalZ;
                 normalizeWide(geometryNormalX, geometryNormalY, geometryNormalZ);
 
-                if (normalMapped)
+                if (normalMapped || detailOverlay)
                 {
                     // Per-lane normal-map fetch, then the TBN chain in
                     // registers: tangent/bitangent are record constants, the
                     // oriented normal is the interpolated geometry normal
                     // (the two-sided flip happens exactly where the scalar
-                    // chain flips, before the TBN build).
+                    // chain flips, before the TBN build). A detail-only draw
+                    // samples the flat normal stand-in, so the chain below
+                    // stays valid for both gates.
                     alignas(64) float normalSampleX[16];
                     alignas(64) float normalSampleY[16];
                     alignas(64) float normalSampleZ[16];
@@ -6396,6 +6661,49 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     __m512 tangentNormalZ = _mm512_sub_ps(
                         _mm512_mul_ps(sampleZ, _mm512_set1_ps(2.0f)), _mm512_set1_ps(1.0f));
                     normalizeWide(tangentNormalX, tangentNormalY, tangentNormalZ);
+                    // Near-field relief overlay (the per-sample path's twin
+                    // block): per-lane scalar fetch of the detail map plus
+                    // the distance fade, perturbing the tangent-space normal
+                    // lanes before the TBN transform.
+                    if (detailOverlay)
+                    {
+                        alignas(64) float detailPerturbX[16];
+                        alignas(64) float detailPerturbY[16];
+                        alignas(64) float lanePositionX[16];
+                        alignas(64) float lanePositionY[16];
+                        alignas(64) float lanePositionZ[16];
+                        _mm512_store_ps(lanePositionX, posX);
+                        _mm512_store_ps(lanePositionY, posY);
+                        _mm512_store_ps(lanePositionZ, posZ);
+                        for (int lane = 0; lane < 16; ++lane)
+                        {
+                            detailPerturbX[lane] = 0.0f;
+                            detailPerturbY[lane] = 0.0f;
+                            if (((shadedMask >> lane) & 1u) == 0u)
+                            {
+                                continue;
+                            }
+                            const glm::vec3 lanePosition(lanePositionX[lane], lanePositionY[lane],
+                                lanePositionZ[lane]);
+                            const float pixelDistance = glm::length(lanePosition - cameraPosition_);
+                            const float fade = glm::clamp(
+                                (detailFadeEnd - pixelDistance) / glm::max(detailFadeEnd - detailFadeStart, 1.0e-3f),
+                                0.0f, 1.0f);
+                            if (fade <= 0.0f)
+                            {
+                                continue;
+                            }
+                            const glm::vec2 detailUv(laneU[lane] * detailUvScale, laneV[lane] * detailUvScale);
+                            const glm::vec3 detailSample = detailNormalMap->sampleTrilinear(detailUv.x, detailUv.y,
+                                glm::vec2(laneDxU[lane], laneDxV[lane]) * detailUvScale,
+                                glm::vec2(laneDyU[lane], laneDyV[lane]) * detailUvScale) * 2.0f - 1.0f;
+                            detailPerturbX[lane] = fade * detailStrength * detailSample.x;
+                            detailPerturbY[lane] = fade * detailStrength * detailSample.y;
+                        }
+                        tangentNormalX = _mm512_add_ps(tangentNormalX, _mm512_load_ps(detailPerturbX));
+                        tangentNormalY = _mm512_add_ps(tangentNormalY, _mm512_load_ps(detailPerturbY));
+                        normalizeWide(tangentNormalX, tangentNormalY, tangentNormalZ);
+                    }
                     const __m512 orientedNormalX = setup.doubleSided ? _mm512_load_ps(flipX) : geometryNormalX;
                     const __m512 orientedNormalY = setup.doubleSided ? _mm512_load_ps(flipY) : geometryNormalY;
                     const __m512 orientedNormalZ = setup.doubleSided ? _mm512_load_ps(flipZ) : geometryNormalZ;
@@ -6547,7 +6855,9 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
 
                 // ---- shading kernel, sixteen lanes -------------------------
                 alignas(64) float shadedWide[3][16];
-                wideshading::shadeRun16(runContext, runPositions, runNormals, runColors, wide, shadedWide);
+                alignas(64) float envSpecularWide[3][16];
+                wideshading::shadeRun16(runContext, runPositions, runNormals, runColors, wide, shadedWide,
+                    envSpecularWide);
                 for (int lane = 0; lane < 16; ++lane)
                 {
                     if (((shadedMask >> lane) & 1u) == 0u)
@@ -6557,7 +6867,8 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     commitRunLane(glm::vec3(shadedWide[0][lane], shadedWide[1][lane], shadedWide[2][lane]),
                         laneDepth[lane], pixelIndex + static_cast<std::size_t>(lane), laneWeightA[lane],
                         laneWeightB[lane], laneRoughness[lane], glm::vec2(laneU[lane], laneV[lane]),
-                        glm::vec2(laneDxU[lane], laneDxV[lane]), glm::vec2(laneDyU[lane], laneDyV[lane]));
+                        glm::vec2(laneDxU[lane], laneDxV[lane]), glm::vec2(laneDyU[lane], laneDyV[lane]),
+                        glm::vec3(envSpecularWide[0][lane], envSpecularWide[1][lane], envSpecularWide[2][lane]));
                 }
 #endif // ENGINE_WIDE_SHADING_AVX512
                 weightA    = stepWeightA;
@@ -6712,7 +7023,11 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                         // the exact expressions, so each lane's normal bits
                         // equal the value the per-sample scan computes). The
                         // kernel then lights the finished normals in SoA.
-                        if (normalMapped)
+                        // The detail overlay rides the same chain (a
+                        // detail-only draw starts from the flat tangent
+                        // normal, exactly like the per-sample path's
+                        // fallbackTangentNormal).
+                        if (normalMapped || detailOverlay)
                         {
                             const glm::vec3 interpolatedPosition = correctedA * cornerA.worldPosition
                                 + correctedB * cornerB.worldPosition + correctedC * cornerC.worldPosition;
@@ -6728,11 +7043,31 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                                     orientedNormal = -orientedNormal;
                                 }
                             }
-                            const glm::vec3 normalMapSample = normalMap->sampleTrilinear(laneUv[lane].x,
-                                laneUv[lane].y, laneUvDerivativeX[lane], laneUvDerivativeY[lane]) * 2.0f - 1.0f;
-                            const glm::vec3 tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
-                                normalMapSample.y * normalScale,
-                                normalMapSample.z));
+                            glm::vec3 tangentNormal = setup.fallbackTangentNormal;
+                            if (normalMapped)
+                            {
+                                const glm::vec3 normalMapSample = normalMap->sampleTrilinear(laneUv[lane].x,
+                                    laneUv[lane].y, laneUvDerivativeX[lane], laneUvDerivativeY[lane]) * 2.0f - 1.0f;
+                                tangentNormal = glm::normalize(glm::vec3(normalMapSample.x * normalScale,
+                                    normalMapSample.y * normalScale,
+                                    normalMapSample.z));
+                            }
+                            if (detailOverlay)
+                            {
+                                const float pixelDistance = glm::length(interpolatedPosition - cameraPosition_);
+                                const float fade = glm::clamp(
+                                    (detailFadeEnd - pixelDistance) / glm::max(detailFadeEnd - detailFadeStart, 1.0e-3f),
+                                    0.0f, 1.0f);
+                                if (fade > 0.0f)
+                                {
+                                    const glm::vec2 detailUv = laneUv[lane] * detailUvScale;
+                                    const glm::vec3 detailSample = detailNormalMap->sampleTrilinear(detailUv.x,
+                                        detailUv.y, laneUvDerivativeX[lane] * detailUvScale,
+                                        laneUvDerivativeY[lane] * detailUvScale) * 2.0f - 1.0f;
+                                    tangentNormal = glm::normalize(tangentNormal
+                                        + fade * detailStrength * glm::vec3(detailSample.x, detailSample.y, 0.0f));
+                                }
+                            }
                             // The (possibly flipped) oriented normal is the
                             // TBN's third axis, matching the per-sample path's
                             // flipped-geometry-normal frame.
@@ -6853,7 +7188,9 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                 if (anyShaded)
                 {
                     glm::vec3 shadedRun[4];
-                    shadingrun::shadeRun4(runContext, runPositions, runNormals, runColors, run, shadedRun);
+                    glm::vec3 envSpecularRun[4];
+                    shadingrun::shadeRun4(runContext, runPositions, runNormals, runColors, run, shadedRun,
+                        envSpecularRun);
 
                     for (int lane = 0; lane < 4; ++lane)
                     {
@@ -6863,7 +7200,7 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                         }
                         commitRunLane(shadedRun[lane], laneDepth[lane], pixelIndex + static_cast<std::size_t>(lane),
                             laneWeightA[lane], laneWeightB[lane], run.roughness[lane], laneUv[lane],
-                            laneUvDerivativeX[lane], laneUvDerivativeY[lane]);
+                            laneUvDerivativeX[lane], laneUvDerivativeY[lane], envSpecularRun[lane]);
                     }
                 }
 
@@ -6977,9 +7314,10 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                         giSample = &quadSample;
                     }
                 }
+                float fieldCoverage = 0.0f;
                 const glm::vec3 shaded
                     = shadeTrianglePixel(setup, record, weightA, weightB, inverseWA, inverseWB, inverseWC,
-                        &fieldTraced, giSample, positionHint, geometryHint);
+                        &fieldTraced, &fieldCoverage, giSample, positionHint, geometryHint);
 
                 if (setup.transparent)
                 {
@@ -6996,20 +7334,22 @@ bool HeadlessBackend::rasterizeFanRecordRuns(const RasterSetup &setup, const Til
                     const glm::vec2 transparentUv = transparentA * record.corners[0].uv
                         + transparentB * record.corners[1].uv + transparentC * record.corners[2].uv;
                     std::uint8_t *pixel = colorBuffer + pixelIndex * 4;
-                    if (fieldTraced)
-                    {
-                        // Transmissive commit: the reflection field's response
-                        // at this pixel already contains what the surface
-                        // shows of the scene behind it (the reflected share
-                        // off the interface plus the transmitted share
-                        // refracted through it), so the shaded result commits
-                        // directly - blending the raw background in as well
-                        // would show the scene behind twice. Depth writes stay
-                        // off: co-transmissive surfaces stack through the
-                        // field's chains, not through occlusion.
-                        *reinterpret_cast<std::uint32_t *>(pixel) = encodeColorRgba(shaded);
-                    }
-                    else
+                    // Transmissive commit, unified with the classic blend: the
+                    // shaded value (analytic, plus the reflection field's
+                    // traced response when the footprint resolved one) blends
+                    // over the framebuffer at the material's opacity, exactly
+                    // like the untraced path below. Replacing the background
+                    // outright with the traced response used to hide
+                    // everything the opaque pass had already drawn under the
+                    // interface - a pool's floor and its caustic net - behind
+                    // an opaque-looking sheet; at opacity o the composite is
+                    // o*(analytic + traced share) + (1-o)*background, which
+                    // keeps the transmitted floor visible while the traced
+                    // share adds the interface's reflected and refracted
+                    // light. Depth writes stay off: co-transmissive surfaces
+                    // stack through the field's chains, not through
+                    // occlusion.
+                    if (true)
                     {
                         // No traced response here (the surface is outside the
                         // traced roughness band, or the reflection module is

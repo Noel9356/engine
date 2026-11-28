@@ -314,11 +314,18 @@ bool setControlSettings(void *userData, const ScriptValue *args, std::uint32_t c
     float *fields[] = {&settings.moveSpeed, &settings.lookSpeed, &settings.mouseSensitivity,
         &settings.orbitDistance, &settings.orbitZoomSpeed, &settings.sprintMultiplier,
         &settings.maxDeltaSeconds, &settings.pitchLimitDegrees};
-    if (count != 9 || capacity < 1 || !uint32Value(args, count, 0, handle))
+    // The ninth value (fly_movement_follows_pitch) is optional and defaults
+    // to the struct's built-in; calls that omit it keep the eight-field
+    // legacy signature.
+    if (capacity < 1 || !uint32Value(args, count, 0, handle))
+        return false;
+    if (count != 9 && count != 10)
         return false;
     for (std::uint32_t i = 0; i < 8; ++i)
         if (!floatValue(args, count, i + 1, *fields[i]))
             return false;
+    if (count == 10 && !boolean(args, count, 9, settings.flyMovementFollowsPitch))
+        return false;
     std::lock_guard lock(bridge.apiMutex);
     if (bridge.camera == nullptr)
         return false;

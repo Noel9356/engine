@@ -44,10 +44,10 @@
 #include <engine/renderer/mesh.hpp>
 #include <engine/window/capabilities.hpp>
 
-#include "planet_camera_input.hpp"
 #include "planet_chunk_renderer.hpp"
 #include "planet_scatter.hpp"
 
+#include "demo_camera_input.hpp"
 #include "demo_environment.hpp"
 #include "planet_demo_support.hpp"
 #include "demo_harness.hpp"
@@ -68,6 +68,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -372,7 +373,7 @@ int main()
     }
 
     engine::ParticipantContext &context = host.context();
-    const std::int64_t maxFps = context.configurationIntegerInSection("engine", "max_fps").value_or(0);
+    const std::int64_t maxFps = context.configurationIntegerInSection("engine", "max_fps").value_or(60);
 
     window::WindowCapability   &windowCapability  = context.acquireCapability<window::WindowCapability>();
     renderer::RenderCapability &renderCapability  = context.acquireCapability<renderer::RenderCapability>();
@@ -483,6 +484,14 @@ int main()
     // The walk controller owns the density-field walk surface; it is only
     // built for the walk view (one extra seed schedule, no worker threads).
     std::unique_ptr<PlanetWalkController> walkController;
+
+    // The last walk spawn (the G key's landing site): the shuttle between
+    // the globe and the surface returns to the SAME patch of ground instead
+    // of re-rolling the viewpoint search, so toggling feels like moving one
+    // camera rather than teleporting between two demos.
+    Viewpoint     cachedWalkViewpoint{};
+    planet::Vec3  cachedWalkFacing{0.0, 0.0, 0.0};
+    bool          haveCachedWalkSpawn = false;
 
     // Places the spawn (eye, target, depth planes, and the walk controller
     // for the walk view) for one view. Deterministic placement from the
@@ -613,14 +622,25 @@ int main()
             // non-snowy, non-desert country), then let the walker stand on the
             // terrain top at 1.7 m eye height. The probe height keeps the
             // viewpoint's sight caps calibrated while the walker itself decides
-            // the exact standing height from the field.
+            // the exact standing height from the field. The G-key shuttle
+            // reuses the previous landing site (see cachedWalkViewpoint): the
+            // search is the expensive part of the placement, and returning to
+            // familiar ground is the point of a toggle.
             Viewpoint viewpoint;
-            bool found = pickViewpoint(*planetCapability, planetHandle, warmGreenLandWindow(2.0, 200.0), ProbePolicy::Inland,
-                60.0, sunDirection, viewpoint);
-            if (!found)
+            bool found = haveCachedWalkSpawn;
+            if (found)
             {
-                found = pickViewpoint(*planetCapability, planetHandle, elevationWindow(1.0, 800.0), ProbePolicy::Inland,
+                viewpoint = cachedWalkViewpoint;
+            }
+            else
+            {
+                found = pickViewpoint(*planetCapability, planetHandle, warmGreenLandWindow(2.0, 200.0), ProbePolicy::Inland,
                     60.0, sunDirection, viewpoint);
+                if (!found)
+                {
+                    found = pickViewpoint(*planetCapability, planetHandle, elevationWindow(1.0, 800.0), ProbePolicy::Inland,
+                        60.0, sunDirection, viewpoint);
+                }
             }
             if (!found)
             {
@@ -634,18 +654,32 @@ int main()
             // composition cue every ground view was missing (the sun sat behind
             // the camera, so the frame showed flat front-lit country and no
             // light source at all).
-            const planet::Vec3 walkFacing = environment.sun.enabled
-                ? planet::Vec3{sunDirection.x - viewpoint.direction.x * planet::dot(sunDirection, viewpoint.direction),
-                    sunDirection.y - viewpoint.direction.y * planet::dot(sunDirection, viewpoint.direction),
-                    sunDirection.z - viewpoint.direction.z * planet::dot(sunDirection, viewpoint.direction)}
-                : planet::Vec3{0.0, 0.0, 0.0};
+            planet::Vec3 walkFacing{0.0, 0.0, 0.0};
+            if (haveCachedWalkSpawn)
+            {
+                walkFacing = cachedWalkFacing;
+            }
+            else
+            {
+                if (environment.sun.enabled)
+                {
+                    walkFacing = planet::Vec3{
+                        sunDirection.x - viewpoint.direction.x * planet::dot(sunDirection, viewpoint.direction),
+                        sunDirection.y - viewpoint.direction.y * planet::dot(sunDirection, viewpoint.direction),
+                        sunDirection.z - viewpoint.direction.z * planet::dot(sunDirection, viewpoint.direction)};
+                }
+                cachedWalkFacing    = walkFacing;
+                cachedWalkViewpoint = viewpoint;
+                haveCachedWalkSpawn = true;
+            }
             walkController->spawn(viewpoint.direction, walkFacing);
             walkController->setAutoWalk(options.orbit);
             eye    = walkController->eye();
             target = walkController->target();
-            // Walking sees metres, not kilometres: a 0.1 m near plane keeps the
-            // ground under the feet from clipping while the far plane still
-            // reaches the horizon.
+            // Walking sees metres, not kilometres: the per-frame near-plane
+            // update below holds the plane at its 0.35 m floor while the
+            // walker stands on the terrain, so the ground under the feet
+            // never clips and the far plane still reaches the horizon.
             nearZ = 0.1;
             farZ  = planetRadius * 2.0;
             std::cout << "demo_planet: walk spawn - eye (" << eye.x << ", " << eye.y << ", " << eye.z << ") radius "
@@ -994,6 +1028,7 @@ int main()
         std::cout << "demo_planet: controls - mouse looks, WASD moves, Space jumps (walk) or rises, Ctrl descends,\n"
                      "      Shift sprints, arrows look, Left Alt toggles the cursor, F12 saves a screenshot,\n"
                      "      1..6 switch views (globe/orbit/coast/cliffs/surface/walk - spawn and camera pose),\n"
+                     "      G toggles between the globe and the walk view (same landing site),\n"
                      "      Escape quits\n";
         if (options.orbit)
         {
@@ -1084,7 +1119,7 @@ int main()
 
     cameraCapability.setControlMode(cameraCapability.self, cameraHandle,
         walkView ? camera::CameraControlMode::Fixed : camera::CameraControlMode::Fly);
-    PlanetCameraInput cameraInput(windowCapability, windowHandle, windowedBackend, !options.orbit);
+    demo::harness::DemoCameraInput cameraInput(windowCapability, windowHandle, windowedBackend, !options.orbit);
 
     // ---- run mode -------------------------------------------------------------------
     const bool          runUntilClosed = options.frames == 0 && windowedBackend;
@@ -1289,15 +1324,27 @@ int main()
         // flat clay look a vertex gradient alone photographs. The relief
         // scans stay isotropic for the same directional reason as the
         // albedo scans above.
-        groundVariants.push_back(loadVariant("ground_grey_diff_1k.jpg", "dirt_nor_gl_1k.jpg"));
-        groundVariants.push_back(loadVariant("aerial_ground_rock_diff_1k.jpg", "forrest_ground_nor_gl_1k.jpg"));
-        groundVariants.push_back(loadVariant("dry_ground_rocks_diff_1k.jpg", "rocky_terrain_02_nor_gl_1k.jpg"));
+        groundVariants.push_back(loadVariant("ground_grey_diff_1k.ktx2", "dirt_nor_gl_1k.ktx2"));
+        groundVariants.push_back(loadVariant("aerial_ground_rock_diff_1k.ktx2", "forrest_ground_nor_gl_1k.ktx2"));
+        groundVariants.push_back(loadVariant("dry_ground_rocks_diff_1k.ktx2", "rocky_terrain_02_nor_gl_1k.ktx2"));
         std::vector<demo::planet_demo::TerrainTextureVariant> rockVariants;
-        rockVariants.push_back(loadVariant("cliff_side_diff_1k.jpg", "cliff_side_nor_gl_1k.jpg"));
-        rockVariants.push_back(loadVariant("rocky_terrain_02_diff_1k.jpg", "rocky_terrain_02_nor_gl_1k.jpg"));
-        rockVariants.push_back(loadVariant("rock_face_diff_1k.jpg", "rock_face_nor_gl_1k.jpg"));
+        rockVariants.push_back(loadVariant("cliff_side_diff_1k.ktx2", "cliff_side_nor_gl_1k.ktx2"));
+        rockVariants.push_back(loadVariant("rocky_terrain_02_diff_1k.ktx2", "rocky_terrain_02_nor_gl_1k.ktx2"));
+        rockVariants.push_back(loadVariant("rock_face_diff_1k.ktx2", "rock_face_nor_gl_1k.ktx2"));
         chunkRenderer.setTerrainTextures(groundVariants, rockVariants,
             groundTextureGateMeters, rockTextureGateMeters, groundReliefGateMeters);
+        // The ground's near-field relief overlay: the grass-blade normal scan
+        // the base set above deliberately leaves out (at 8 m tiling its
+        // directionality reads as smeared paint) rides in as a ~0.7 m overlay
+        // instead - at blade scale the directional streaks ARE the grass, and
+        // the per-pixel distance fade means the eye only ever meets them at
+        // the range where blades resolve (full under 12 m, gone by 38 m).
+        // This is the layer that answers "the ground does not get more
+        // detailed as I get closer": the descent's last kilometres hand the
+        // base relief scan over to this grain as the fade crosses.
+        const renderer::TextureHandle groundDetailNormal = loadTexture("grass_detail_nor_gl_1k.ktx2");
+        chunkRenderer.setGroundDetailNormal(groundDetailNormal,
+            static_cast<float>(params.terrainTextureTileMetersGround / 0.7), 8.0f, 26.0f, 0.4f);
     }
     // The world-anchored cloud shell bakes the pbr environment's lighting
     // into its vertex colors and draws unlit (see BackdropLighting); the
@@ -1403,20 +1450,31 @@ int main()
     double        simSeconds      = 0.0;
     std::array<window::WindowEvent, 64> eventBuffer;
     auto lastWallClock = std::chrono::steady_clock::now();
+    // Rolling wall-clock frame rate for the periodic stats line.
+    auto          fpsWindowStart    = std::chrono::steady_clock::now();
+    std::uint64_t fpsWindowFrames   = 0;
 
     const bool presentedPacing = renderCapability.waitsForPresentation != nullptr
         && renderCapability.waitsForPresentation(renderCapability.self, rendererHandle);
-    const bool pacerSuppressedByVsync = presentedPacing && maxFps > 0;
-    const double effectiveTargetHz = pacerSuppressedByVsync ? 0.0 : static_cast<double>(std::max<std::int64_t>(maxFps, 0));
-    const std::uint32_t pacerSpinWindowMicroseconds = effectiveTargetHz > 0.0 ? 200u : 0u;
-    engine::FramePacer framePacer(
-        {.targetFrameRateHz = effectiveTargetHz, .spinWindowMicroseconds = pacerSpinWindowMicroseconds});
-    framePacer.reset();
-    if (pacerSuppressedByVsync)
+    // Frame pacing (the engine.max_fps contract): a windowed run never
+    // exceeds max_fps (default 60) - the software pacer enforces it unless
+    // the display's own vsync cap is at least as strict - and max_fps 0
+    // never exceeds the display's refresh rate (vsync, or the pacer at the
+    // monitor's queried rate). Headless capture runs stay unthrottled.
+    double monitorRefreshHz = 0.0;
+    if (windowedBackend && windowCapability.getWindowAttributes != nullptr)
     {
-        std::cout << "demo_planet: max_fps " << maxFps
-                  << " left to vsync - presentation is already pacing the frame loop\n";
+        window::WindowAttributes windowAttributes;
+        if (windowCapability.getWindowAttributes(windowCapability.self, windowHandle, &windowAttributes))
+        {
+            monitorRefreshHz = windowAttributes.monitorRefreshRateHz;
+        }
     }
+    engine::FramePacer framePacer;
+    const double effectiveTargetHz = demo::harness::applyFramePaceTarget(
+        framePacer, windowedBackend, std::max<std::int64_t>(maxFps, 0), presentedPacing, monitorRefreshHz,
+        "demo_planet");
+    framePacer.reset();
 
     // Warmup frames precede the rendered run; both are bounded by their own
     // counter (warmup ends early on a fully built visible set), so the loop
@@ -1475,6 +1533,15 @@ int main()
                     else if (event.key == window::Key::Num6)
                     {
                         pendingViewSwitch = "walk";
+                    }
+                    else if (event.key == window::Key::G)
+                    {
+                        // Globe/surface shuttle: the two ends of the scale
+                        // range without the flight between them. From the
+                        // walk view G returns to the globe; from anywhere
+                        // else it drops onto the last walk spawn (a fresh
+                        // spawn the first time).
+                        pendingViewSwitch = activeView == "walk" ? "globe" : "walk";
                     }
                 }
                 else
@@ -1623,6 +1690,42 @@ int main()
         }
         cameraCapability.update(cameraCapability.self, cameraHandle, &cameraSample, deltaSeconds);
 
+        // Dynamic near plane: depth-buffer precision at planetary scale is
+        // the flicker the eye reads as overlapping ground - the streaming
+        // stand-ins and the LOD rings intentionally draw nearly-coincident
+        // geometry, and an f32 depth buffer with a fixed 0.1 m near plane
+        // cannot separate surfaces a few kilometers out (the depth step
+        // grows quadratically with distance over the near plane). Scaling
+        // the near plane with the eye's altitude keeps the ratio sane at
+        // every altitude of the descent: nothing visible ever sits inside
+        // the plane (the ground below the eye is a whole altitude away, and
+        // a standing eye keeps the 0.35 m floor), while the mid-field depth
+        // step shrinks by the same factor the near plane grew.
+        {
+            glm::dvec3 liveEye = eye;
+            if (!walkView && !options.orbit)
+            {
+                // Free flight integrates movement inside the camera module;
+                // its pose is anchored to the shift the last setLookAt
+                // composed with, so the live eye reconstructs as the pose
+                // plus that (piecewise-constant) shift.
+                camera::CameraPose pose{};
+                if (cameraCapability.cameraPose(cameraCapability.self, cameraHandle, &pose))
+                {
+                    const glm::dvec3 anchorShift = cameraRelativeShift(eye - planetCenter);
+                    liveEye = glm::dvec3(pose.position[0], pose.position[1], pose.position[2]) + anchorShift;
+                }
+            }
+            const double eyeAltitudeForNear = glm::length(liveEye - planetCenter) - planetRadius;
+            const double dynamicNearZ = glm::clamp(eyeAltitudeForNear * 0.08, 0.35, planetRadius * 0.01);
+            if (dynamicNearZ > nearZ * 1.05 || dynamicNearZ < nearZ * 0.95)
+            {
+                nearZ = dynamicNearZ;
+                cameraCapability.setProjection(cameraCapability.self, cameraHandle, camera::ProjectionType::Perspective,
+                    cameraFovYDegrees, static_cast<float>(nearZ), static_cast<float>(farZ));
+            }
+        }
+
         camera::ViewState viewState{};
         cameraCapability.viewState(cameraCapability.self, cameraHandle, framebufferWidth, framebufferHeight, &viewState);
         renderer::CameraMatrices cameraMatrices{};
@@ -1658,8 +1761,8 @@ int main()
         if (warmupRemaining > 0 || settleWindowOpen)
         {
             // Warmup frames exist to give the build pool wall-clock time.
-            // With pacing disabled (max_fps 0, the headless default) they
-            // would otherwise spin through the budget in microseconds - a
+            // With pacing inactive (headless capture runs, or max_fps 0)
+            // they would otherwise spin through the budget in microseconds - a
             // static view's update is a handful of fast-path checks - and
             // the pool would never see the machine. Warmup applies its own
             // floor interval in that case, and ends early once the visible
@@ -1850,14 +1953,27 @@ int main()
         // Both stats reports cadence on framesRendered (warmup excluded):
         // the raster stats above use the same counter, so the frame numbers
         // in the log agree across reports.
+        ++fpsWindowFrames;
         if (options.statsEveryFrames != 0 && framesRendered % options.statsEveryFrames == 0)
         {
+            // The wall-clock frame rate over the stats window: with the
+            // frame limiter active this reads the configured limit
+            // (engine.max_fps, 60 by default) whenever the frame cost stays
+            // under one frame interval.
+            const auto   now          = std::chrono::steady_clock::now();
+            const double windowSeconds = std::chrono::duration<double>(now - fpsWindowStart).count();
+            const double framesPerSecond
+                = windowSeconds > 0.0 ? static_cast<double>(fpsWindowFrames) / windowSeconds : 0.0;
+            fpsWindowStart  = now;
+            fpsWindowFrames = 0;
+            char fpsText[16];
+            std::snprintf(fpsText, sizeof(fpsText), "%.1f", framesPerSecond);
             planet::PlanetStatistics statistics{};
             if (planetCapability->copyStatistics(planetCapability->self, planetHandle, &statistics))
             {
-                std::cout << "demo_planet: frame " << frameIndex << " | chunks visible " << statistics.chunksVisible
-                          << ", ready " << statistics.chunksReady << ", building " << statistics.chunksBuilding
-                          << ", fallback " << statistics.chunksFallback
+                std::cout << "demo_planet: frame " << frameIndex << " | " << fpsText << " fps | chunks visible "
+                          << statistics.chunksVisible << ", ready " << statistics.chunksReady << ", building "
+                          << statistics.chunksBuilding << ", fallback " << statistics.chunksFallback
                           << ", cached " << statistics.chunksReadyTotal << ", triangles " << statistics.triangleCount
                           << ", depth " << statistics.octreeDepthUsed
                           << ", update " << statistics.lastUpdateMilliseconds << " ms\n";

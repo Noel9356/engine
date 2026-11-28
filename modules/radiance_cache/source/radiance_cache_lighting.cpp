@@ -999,7 +999,14 @@ bool latticeCorners(const GiProbeLevel &level, const glm::vec3 &position, Lattic
         return false;
     }
     const glm::dvec3 base = glm::min(glm::floor(logical), glm::dvec3(double(dim - 2)));
-    const glm::vec3 fraction(logical - base);
+    // Smoothstep per axis (the DDGI probe-blend convention; the renderer and
+    // GLSL twins in gi_probe_sampling.hpp / mesh.frag carry the rationale):
+    // plain trilinear weights step their derivative at every lattice
+    // boundary, and broad flats photograph the lattice as a cell grid. The
+    // curve keeps the weights' endpoints and unit sum while making the join
+    // C1, so the exported-grid convention and the renderer's blend agree.
+    const glm::vec3 rawFraction(logical - base);
+    const glm::vec3 fraction = rawFraction * rawFraction * (3.0f - 2.0f * rawFraction);
     for (std::uint32_t corner = 0; corner < 8; ++corner)
     {
         const std::uint32_t cx = static_cast<std::uint32_t>(base.x) + (corner & 1u);

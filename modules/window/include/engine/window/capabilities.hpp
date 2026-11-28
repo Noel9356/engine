@@ -25,7 +25,9 @@ namespace window
 // 16 -> 17 added Key::F12 (event-only; it sits beyond the 64-bit state mask,
 // so isKeyDown/keyStateMask never report it - KeyPressed/KeyReleased events
 // carry it, which is all an edge-triggered action like a screenshot needs).
-inline constexpr std::uint32_t windowCapabilityAbi = 17u;
+// 17 -> 18 added the owning monitor's refresh rate to WindowAttributes (the
+// display-rate frame cap a demo's max_fps = 0 asks for; 0 = unknown).
+inline constexpr std::uint32_t windowCapabilityAbi = 18u;
 
 // Opaque window identifier; 0 (invalidWindow) means "none".
 using WindowHandle = std::uint32_t;
@@ -329,6 +331,15 @@ struct WindowAttributes
 
     float contentScaleX = 1.0f;
     float contentScaleY = 1.0f;
+
+    // Refresh rate of the monitor the window currently sits on, in Hz; 0
+    // means "unknown" (a backend without a display, or a monitor whose video
+    // mode reports 0). Fullscreen windows report their own monitor; windowed
+    // ones report the monitor whose work area holds the largest share of the
+    // window (the primary monitor when none overlaps). This is the rate a
+    // frame limiter falls back to when the caller asks for "the display's
+    // maximum frame rate" without a blocking present mode.
+    double monitorRefreshRateHz = 0.0;
 };
 
 // Creation parameters. The has* flags distinguish "caller set this" from the

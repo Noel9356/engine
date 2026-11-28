@@ -29,6 +29,7 @@ config_keys           = [
     "reflection_field.skip_unchanged_frames",
     "reflection_field.temporal.neighborhood_clamp_sigma",
     "reflection_field.temporal.strength",
+    "reflection_field.temporal.update_budget_milliseconds",
     "reflection_field.trace.bias_m",
     "reflection_field.trace.lobe_alpha_floor",
     "reflection_field.trace.transmission_lobe_alpha_floor",

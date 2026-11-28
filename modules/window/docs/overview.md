@@ -4,7 +4,7 @@ window owns the engine's OS windows: it creates and destroys them, pumps the OS 
 
 ## Capability
 
-The module provides four capabilities, all sharing ABI 17 (constant `windowCapabilityAbi`, see `include/engine/window/capabilities.hpp`):
+The module provides four capabilities, all sharing ABI 18 (constant `windowCapabilityAbi`, see `include/engine/window/capabilities.hpp`):
 
 | Capability | Role |
 | --- | --- |
@@ -19,7 +19,7 @@ Error convention: fallible calls report a `WindowError` through an out-parameter
 
 Runtime control calls change a live window without recreating it. `setVisible` shows or hides it; `setResizable`, `setDecorated`, and `setFloating` toggle the matching window attributes; `setOpacity` takes a value in [0, 1] (values outside are clamped); `focus` raises and focuses it; `requestAttention` asks the platform to flag it (for example a taskbar flash) without stealing focus; `iconify`, `restore`, and `maximize` change the placement state. `getPosition` is the getter counterpart of `setPosition`.
 
-`getWindowAttributes` returns a `WindowAttributes` snapshot in one call: focus, visibility, iconification, maximization, resizability, decoration, floating, cursor hover, opacity, and the monitor content scale. The GLFW backend reads the live window-system attributes; the headless backend reports the state requested through the control calls (focus and hover are always false there, content scale is always 1). `getContentScale` returns the scale pair alone for UI code that only needs HiDPI sizing, and `rawMouseMotionSupported` tells callers whether `CursorMode::Captured` can deliver raw (unaccelerated) mouse motion on the active platform.
+`getWindowAttributes` returns a `WindowAttributes` snapshot in one call: focus, visibility, iconification, maximization, resizability, decoration, floating, cursor hover, opacity, the monitor content scale, and the refresh rate of the monitor the window sits on (0 = unknown; fullscreen windows report their own monitor, windowed ones the monitor holding the largest share of the window). The GLFW backend reads the live window-system attributes; the headless backend reports the state requested through the control calls (focus and hover are always false there, content scale is always 1, refresh rate unknown). The refresh rate is the cap a frame limiter falls back to when a caller asks for the display's maximum frame rate without a blocking present mode. `getContentScale` returns the scale pair alone for UI code that only needs HiDPI sizing, and `rawMouseMotionSupported` tells callers whether `CursorMode::Captured` can deliver raw (unaccelerated) mouse motion on the active platform.
 
 `waitEvents` is the idle-friendly alternative to `pollEvents`: it blocks until events arrive or the timeout (in seconds; values <= 0 wait indefinitely) expires, then re-polls gamepads. Applications that render on demand can use it to avoid busy-polling; the headless backend returns immediately.
 

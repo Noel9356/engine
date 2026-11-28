@@ -79,6 +79,12 @@ struct CameraControlSettings
     float sprintMultiplier  = 3.0f;
     float maxDeltaSeconds   = 0.25f;
     float pitchLimitDegrees = 89.0f;
+    // Fly-mode movement plane: true moves the forward axis along the full
+    // pitched view direction (free-flight convention - looking down and
+    // pressing forward dives), false walks the orientation basis's
+    // horizontal plane (first-person convention - pitch only steers the
+    // gaze, Space/Ctrl ride the height axis). Orbit and Fixed ignore it.
+    bool  flyMovementFollowsPitch = true;
 };
 
 // Creation-time parameters; zero/unset members fall back to module defaults

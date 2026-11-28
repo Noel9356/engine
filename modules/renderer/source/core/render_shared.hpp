@@ -245,5 +245,60 @@ inline bool writePng(const char *filePath, std::uint32_t width, std::uint32_t he
     return true;
 }
 
+// ---- Block-compressed texture plumbing (KTX path) ---------------------------
+//
+// The block formats the KTX loader and the backends agree on (see
+// ktx_texture_loader.hpp). Declared here because both backends and the
+// module core need the type without pulling the loader header into every
+// translation unit.
+enum class BlockTextureFormat : std::uint32_t
+{
+    Bc1Rgb  = 0, // 4x4 blocks, 8 bytes (RGB + 1-bit alpha)
+    Bc3Rgba = 1, // 4x4 blocks, 16 bytes (BC1 color + BC4 alpha)
+    Bc4R    = 2, // 4x4 blocks, 8 bytes (one BC4 block, R only)
+    Bc5Rg   = 3, // 4x4 blocks, 16 bytes (two BC4 blocks, RG)
+    Bc7Rgba = 4  // 4x4 blocks, 16 bytes (high-quality RGBA)
+};
+
+// A block-compressed texture as the backends receive it from the module
+// core's KTX path: every mip level's block bytes concatenated in level
+// order, with each level's byte count following it. pixels is borrowed for
+// the createBlockTexture call only; the backend copies (or decodes) before
+// returning. The level count, dimensions and format describe the image the
+// blocks encode; the sampler is built from filter/address exactly like
+// createTexture's.
+struct BlockTextureDescription
+{
+    std::uint32_t width      = 0;
+    std::uint32_t height     = 0;
+    std::uint32_t levelCount = 1;
+
+    BlockTextureFormat format = BlockTextureFormat::Bc7Rgba;
+
+    const std::uint8_t *pixels     = nullptr; // all levels concatenated
+    const std::uint64_t *levelBytes = nullptr; // per level, levelCount entries
+
+    TextureFilter filter  = TextureFilter::Linear;
+    TextureAddress address = TextureAddress::Repeat;
+};
+
+// Which block formats a backend can consume through createBlockTexture.
+// Asked of the backend before a KTX file is transcoded so the loader picks
+// the best target the machine actually samples natively (the headless
+// backend accepts every entry since bcdec decodes them all on the CPU).
+struct BlockTextureFormatSupport
+{
+    bool bc1  = false;
+    bool bc3  = false;
+    bool bc4  = false;
+    bool bc5  = false;
+    bool bc7  = false;
+
+    [[nodiscard]] bool any() const
+    {
+        return bc1 || bc3 || bc4 || bc5 || bc7;
+    }
+};
+
 } // namespace renderer
 } // namespace engine

@@ -212,6 +212,13 @@ inline constexpr double kTreeCellMeters  = 38.0;
 inline constexpr double kBushCellMeters  = 24.0;
 inline constexpr double kGrassCellMeters = 0.62;
 inline constexpr double kGrassMidCellMeters = 1.4;
+inline constexpr double kGrassFarCellMeters = 2.0;
+// The far annulus begins here: the mid lattice's 1.4 m spacing spends a card
+// per patch the eye can no longer resolve, so beyond this ring the sward
+// coarsens to a 2.4 m lattice whose tufts read as ground cover texture (the
+// step from 1.4 m stays under 2x - a coarser jump photographed as a density
+// seam).
+inline constexpr double kGrassFarInnerMeters = 48.0;
 inline constexpr double kRockCellMeters  = 42.0;
 inline constexpr double kFoamCellMeters  = 26.0;
 
@@ -718,7 +725,7 @@ void PlanetScatterSystem::loadVegetationAtlases(const std::filesystem::path &ass
     const std::filesystem::path vegetationDirectory = assetDirectory / "vegetation";
     renderer::TextureHandle handles[3] = {renderer::invalidTexture, renderer::invalidTexture, renderer::invalidTexture};
     renderer::TextureHandle *slots[3] = {&treeTexture_, &bushTexture_, &grassTexture_};
-    const char *files[3] = {"tree_atlas.png", "bush_atlas.png", "grass_atlas.png"};
+    const char *files[3] = {"tree_atlas.ktx2", "bush_atlas.ktx2", "grass_atlas.ktx2"};
     bool allLoaded = true;
     for (std::size_t index = 0; index < 3; ++index)
     {
@@ -2234,6 +2241,12 @@ void PlanetScatterSystem::rebuildGrass(const glm::dvec3 &eyePlanetLocal)
     glm::dvec3 eyeDirection, east, north;
     tangentFrameAt(eyePlanetLocal, eyeDirection, east, north);
 
+    // The sward clump field: one fBm stream keyed off the planet seed (the
+    // near disc and the mid annulus sample it as their presence modulator -
+    // the same grove-clump idea the tree walk runs, at sward scale).
+    const engine::planet::FbmStreamSeeds swardClumpSeeds
+        = engine::planet::makeFbmSeeds(engine::planet::hashCombine64(params_.seed, 0x51D7A3ull), 2);
+
     // Grass emit styling: no ground fade and no aerial haze - the sward is a
     // near-field system, and its color story is the site's own sward tint.
     FoliageEmitStyle style;
@@ -2253,8 +2266,14 @@ void PlanetScatterSystem::rebuildGrass(const glm::dvec3 &eyePlanetLocal)
     // the frame for no visual gain beyond nine meters. The mid cap carries
     // the 14..90 m band as a real sward (a sparse-dots band read as bare
     // ground with stranded tufts).
-    constexpr std::uint32_t kMaxGrassNear = 3000;
-    constexpr std::uint32_t kMaxGrassMid = 6400;
+    // Count caps are MEMORY guards and must never bind: walkLattice walks
+    // row-major (not distance-ordered), so a cap that fills rejects the near
+    // side of the ring while keeping the far edge. The totals sit well under
+    // the caps at the demo's 150 m radius (near ~2.6k cards, mid ~2.5k, far
+    // ~3.5k after the presence gates).
+    constexpr std::uint32_t kMaxGrassNear = 4000;
+    constexpr std::uint32_t kMaxGrassMid = 12000;
+    constexpr std::uint32_t kMaxGrassFar = 10000;
     const double nearDiscMeters = std::min(grassRadius, 14.0);
     std::uint32_t grassCount = 0;
 
@@ -2311,8 +2330,18 @@ void PlanetScatterSystem::rebuildGrass(const glm::dvec3 &eyePlanetLocal)
             // behind the eye).
             const double grassRadiusMeters = std::max(2.0, params_.vegetationGrassRadiusMeters);
             const double ringFade = smoothStepLocal(grassRadiusMeters, grassRadiusMeters * 0.55, cellDistance);
+            // Sward density field: a 7 m fBm channel modulates each cell's
+            // presence, so the carpet breaks into clumped runs and open bald
+            // patches the way real swards grow - the one-per-cell lattice's
+            // own jitter randomizes POSITIONS, but a flat presence
+            // probability still plants every cell at the same expectation,
+            // which the eye reads as a regular grid at walking distance.
+            const double clumpNoise = engine::planet::fbm(swardClumpSeeds,
+                engine::planet::Vec3{cellCenter.x, cellCenter.y, cellCenter.z}, 7.0,
+                engine::planet::FbmParams{2, 2.0, 0.5});
+            const double clumpDensity = 0.40 + 0.60 * clamp01(0.5 + 0.5 * clumpNoise);
             const double presence = base * (0.55 + 0.45 * sample.moisture01) * ringFade
-                * params_.vegetationGrassDensity;
+                * params_.vegetationGrassDensity * clumpDensity;
             if (hashUnit(hash, 3) > clamp01(presence))
             {
                 return;
@@ -2384,20 +2413,28 @@ void PlanetScatterSystem::rebuildGrass(const glm::dvec3 &eyePlanetLocal)
             // the soil - the decal the trees wear, scaled to the tuft (a
             // sward clump's shadow is barely wider than the clump itself
             // and roughly half its height stretched down-sun).
-            bakeShadowRibbon(shadowGround, up, halfWidth * 1.35, height * 0.50, cardA.shadowRibbon);
-            cardB.shadowRibbon.strips = 0; // one ribbon per tuft (the crossed pair shares it)
+            // No ground ribbon for grass at all: blades transmit most of the
+            // sun, so a real sward casts no per-tuft ground shadow - and at
+            // sward density even a footprint-sized decal per tuft reads as a
+            // polka-dot field of dark ellipses. The card's own rootDarken
+            // (0.45) grounds the sprite at its base; the directional shadow
+            // story belongs to the trees, bushes and rocks, which keep their
+            // draped ribbons.
+            cardA.shadowRibbon.strips = 0;
+            cardB.shadowRibbon.strips = 0;
             emitFoliageCard(vertices, indices, cardA, eyePlanetLocal, style);
             emitFoliageCard(vertices, indices, cardB, eyePlanetLocal, style);
             next[key].push_back(cardA);
             next[key].push_back(cardB);
             grassCount += 2u;
         });
-    // Mid annulus (near disc edge .. full radius): coarser lattice,
+    // Mid annulus (near disc edge .. far ring): coarser lattice,
     // single card per tuft - the crossed pair is invisible beyond a few
     // meters and costs a full extra card of fill per tuft.
+    const double midOuter = std::min(grassRadius, kGrassFarInnerMeters);
     if (grassRadius > nearDiscMeters)
     {
-        walkLattice(eyePlanetLocal, east, north, nearDiscMeters, grassRadius, kGrassMidCellMeters,
+        walkLattice(eyePlanetLocal, east, north, nearDiscMeters, midOuter, kGrassMidCellMeters,
             [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
             {
                 if (grassCount >= kMaxGrassNear + kMaxGrassMid)
@@ -2440,8 +2477,16 @@ void PlanetScatterSystem::rebuildGrass(const glm::dvec3 &eyePlanetLocal)
                     return;
                 }
                 const double ringFade = smoothStepLocal(grassRadius, grassRadius * 0.55, cellDistance);
+                // The mid annulus rides the same sward density field (see
+                // the near disc): the clumped runs and bald patches continue
+                // out through the readable mid ground instead of the carpet
+                // look the flat per-cell expectation plants there.
+                const double midClumpNoise = engine::planet::fbm(swardClumpSeeds,
+                    engine::planet::Vec3{cellCenter.x, cellCenter.y, cellCenter.z}, 7.0,
+                    engine::planet::FbmParams{2, 2.0, 0.5});
+                const double midClumpDensity = 0.40 + 0.60 * clamp01(0.5 + 0.5 * midClumpNoise);
                 const double presence = base * (0.55 + 0.45 * sample.moisture01) * ringFade
-                    * params_.vegetationGrassDensity;
+                    * params_.vegetationGrassDensity * midClumpDensity;
                 if (hashUnit(hash, 3) > clamp01(presence))
                 {
                     return;
@@ -2500,6 +2545,118 @@ void PlanetScatterSystem::rebuildGrass(const glm::dvec3 &eyePlanetLocal)
                 card.rootDarken = 0.45f;
                 card.fixedRight = true;
                 card.shadowRibbon.strips = 0; // mid tufts carry no ribbon (the near disc owns the footprint shade)
+                emitFoliageCard(vertices, indices, card, eyePlanetLocal, style);
+                next[key].push_back(card);
+                ++grassCount;
+            });
+    }
+    // Far annulus (48 m .. full radius): the sward coarsens to a 3.2 m
+    // lattice of single cards - beyond the mid ring a tuft is a few pixels,
+    // and what the eye asks for is GROUND COVER, not card geometry. Without
+    // this ring the sward ends at the mid bound and the mid ground reads as
+    // a bare plain (the "empty world" read); the coarser lattice covers the
+    // same reach at a fraction of the card count. The ring fades over its
+    // outer 40% so the sward dissolves into the terrain texture instead of
+    // stopping at a circle.
+    if (grassRadius > kGrassFarInnerMeters)
+    {
+        walkLattice(eyePlanetLocal, east, north, kGrassFarInnerMeters, grassRadius, kGrassFarCellMeters,
+            [&](std::int64_t cx, std::int64_t cy, std::int64_t cz, const glm::dvec3 &cellCenter, double cellDistance)
+            {
+                if (grassCount >= kMaxGrassNear + kMaxGrassMid + kMaxGrassFar)
+                {
+                    return;
+                }
+                const CellKey key{{cx, cy, cz, 2}};
+                if (const auto cached = cache.find(key); cached != cache.end())
+                {
+                    for (const PlacedCard &card : cached->second)
+                    {
+                        emitFoliageCard(vertices, indices, card, eyePlanetLocal, style);
+                    }
+                    next.emplace(key, cached->second);
+                    grassCount += static_cast<std::uint32_t>(cached->second.size());
+                    return;
+                }
+                const std::uint64_t hash = cellHash(params_.seed, kSaltGrass, cx, cy, cz);
+                if (hashUnit(hash, 0) > 0.9)
+                {
+                    return;
+                }
+                const glm::dvec3 jitter = east * (hashUnit(hash, 1) - 0.5) * kGrassFarCellMeters * 1.0
+                    + north * (hashUnit(hash, 2) - 0.5) * kGrassFarCellMeters * 1.0;
+                const glm::dvec3 direction = glm::normalize(cellCenter + jitter);
+                double radius = 0.0;
+                if (!sampleSurfaceRadius(direction, radius) || radius < seaRadius + kMinLandElevationMeters * 0.6)
+                {
+                    return;
+                }
+                ClimateSample sample;
+                const double directionArray[3] = {direction.x, direction.y, direction.z};
+                if (capability_.sampleClimate(capability_.self, planet_, directionArray, radius, &sample) == false)
+                {
+                    return;
+                }
+                const double base = grassBaseDensity(sample.biome);
+                if (base <= 0.0)
+                {
+                    return;
+                }
+                const double ringFade = smoothStepLocal(grassRadius, grassRadius * 0.60, cellDistance);
+                // A higher presence floor than the mid ring: the far ring
+                // exists to keep the mid ground READ as sward (an empty band
+                // between the mid lattice and the trees photographed as a
+                // barren plain), so it trades per-tuft detail for coverage.
+                const double presence = base * (0.70 + 0.30 * sample.moisture01) * ringFade
+                    * params_.vegetationGrassDensity;
+                if (hashUnit(hash, 3) > clamp01(presence))
+                {
+                    return;
+                }
+                {
+                    engine::planet::ReliefSample relief{};
+                    if (capability_.sampleRelief(capability_.self, planet_, directionArray, &relief)
+                        && relief.cliffFactor >= params_.cliffSteepnessLow)
+                    {
+                        return;
+                    }
+                }
+                const SpeciesCard species = grassSpeciesFor(sample.biome, hash);
+                const double moisture = clamp01(static_cast<float>(sample.moisture01));
+                const double height = (species.minHeightMeters
+                    + hashUnit(hash, 4) * (species.maxHeightMeters - species.minHeightMeters))
+                    * (0.78 + 0.44 * moisture);
+                const double halfWidth = 0.5 * height * species.aspect * (0.95 + 0.5 * hashUnit(hash, 5));
+                const glm::dvec3 up = direction;
+                const glm::dvec3 center = direction * radius - up * (0.34 * height);
+                glm::dvec3 right1 = glm::cross(up, east);
+                if (glm::length(right1) < 1.0e-6)
+                {
+                    right1 = north;
+                }
+                right1 = glm::normalize(right1);
+                const double angle = hashUnit(hash, 6) * 2.0 * kPi;
+                const glm::dvec3 rotated = right1 * std::cos(angle) + glm::cross(up, right1) * std::sin(angle);
+                right1 = glm::normalize(rotated);
+                const std::array<float, 3> color = grassSwardTint(sample,
+                    0.72 + 0.62 * hashUnit(hash, 7), 0.16 * (hashUnit(hash, 8) - 0.5));
+                const float farCloudShade = static_cast<float>(clamp01(
+                    1.0 - shadowField_.cloudShadow(engine::planet::Vec3{direction.x, direction.y, direction.z},
+                        params_.derivedVoxelMeters)));
+                const std::array<float, 3> farShaded{color[0] * farCloudShade,
+                    color[1] * farCloudShade, color[2] * farCloudShade};
+                PlacedCard card;
+                card.base = center;
+                card.up = up;
+                card.right = right1;
+                card.halfWidth = halfWidth;
+                card.height = height;
+                card.speciesColor = farShaded;
+                card.uvTile = species.tile;
+                card.mirrorU = hashUnit(hash, 9) < 0.5;
+                card.rootDarken = 0.45f;
+                card.fixedRight = true;
+                card.shadowRibbon.strips = 0;
                 emitFoliageCard(vertices, indices, card, eyePlanetLocal, style);
                 next[key].push_back(card);
                 ++grassCount;
@@ -2819,7 +2976,11 @@ void PlanetScatterSystem::scatterSurf(const glm::dvec3 &eyePlanetLocal, const gl
     // gets a breaker band (seaward, where the waves pitch and break) and a
     // swash band (at the waterline, where the run-up washes the sand).
     const std::uint32_t azimuthCount = 52;
-    const double maxMarchMeters = 700.0;
+    // The march reaches past a gentle bay's far shore: a shallow beach can
+    // hold the terrain above the datum sea radius for the better part of a
+    // kilometer, and a march that stops at 700 m found no waterline at all
+    // on such spawns (verified: zero strips, every azimuth still dry).
+    const double maxMarchMeters = 2400.0;
     for (std::uint32_t azimuthIndex = 0; azimuthIndex < azimuthCount; ++azimuthIndex)
     {
         if (stripCount >= kMaxStrips)
@@ -2908,13 +3069,28 @@ void PlanetScatterSystem::scatterSurf(const glm::dvec3 &eyePlanetLocal, const gl
         // bands at every azimuth march around the shore as continuous
         // concentric stripes - the contour-map tell - while gated bands
         // leave irregular gaps the way real surf patches do.
+        // The lift rides ABOVE the wave-roughened water sheet (the same
+        // kSeaSpriteLiftMeters lesson the whitecap sprites learned): the
+        // sheet's crests stand roughly half a meter over the datum sea
+        // radius and depth-write, so a strip lifted 0.2-0.3 m renders
+        // UNDER the water - emitted, occluded, invisible (verified by an
+        // on/off pixel diff that changed nothing).
+        // The bands SCALE with the crossing distance: a shallow spawn holds
+        // its waterline a kilometer and more out (the march's reach), where
+        // a 5x3 m quad is sub-pixel and the surf reads as nothing at all -
+        // scaling keeps the angular size a close shore's band subtends.
+        const double distanceScale = std::max(1.0, crossing / 220.0);
         if (hashUnit(stripHash, 6) < 0.58)
         {
-            pushStrip(-3.0 - 6.0 * hashUnit(stripHash, 1), 5.0 + 9.0 * hashUnit(stripHash, 2), 2.2 + 1.6 * hashUnit(stripHash, 3), 0.3);
+            pushStrip((-3.0 - 6.0 * hashUnit(stripHash, 1)) * distanceScale,
+                (5.0 + 9.0 * hashUnit(stripHash, 2)) * distanceScale,
+                (2.2 + 1.6 * hashUnit(stripHash, 3)) * distanceScale, 0.52);
         }
         if (hashUnit(stripHash, 7) < 0.45)
         {
-            pushStrip(0.8 + 1.2 * hashUnit(stripHash, 8), 4.0 + 7.0 * hashUnit(stripHash, 4), 1.6 + 1.2 * hashUnit(stripHash, 5), 0.2);
+            pushStrip((0.8 + 1.2 * hashUnit(stripHash, 8)) * distanceScale,
+                (4.0 + 7.0 * hashUnit(stripHash, 4)) * distanceScale,
+                (1.6 + 1.2 * hashUnit(stripHash, 5)) * distanceScale, 0.47);
         }
     }
 

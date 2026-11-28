@@ -8,7 +8,13 @@
 
 [engine]
 active_plugins        = []
-max_fps               = 0
+# The frame-rate contract for windowed runs: a positive value is a hard cap -
+# the loop never exceeds max_fps (the software pacer enforces it whenever the
+# display's own vsync cap is looser) - and 0 caps the loop at the display's
+# refresh rate (vsync when presentation blocks, otherwise the pacer at the
+# monitor's queried rate). Headless capture and benchmark runs are never
+# throttled.
+max_fps               = 60
 max_frame_delta_seconds = 0.25
 max_worker_count      = 8
 priority_aging_ms     = 500
@@ -36,9 +42,9 @@ sun_enabled       = true
 sun_direction     = [-0.84, 0.17, -0.51]
 sun_color         = [1.0, 0.93, 0.82]
 sun_intensity     = 3.2
-ambient_intensity = 0.22
+ambient_intensity = 0.40
 ambient_mode      = "hemisphere"
-exposure          = 0.60
+exposure          = 0.72
 tone_mapping      = "aces"
 
 [direct_lighting]
@@ -70,10 +76,50 @@ depth_layers     = 1
 
 [radiance_cache.caustics]
 # The showcase's water and glass focus light onto the pool floor; the photon
-# budget runs well above the module default so the caustic net resolves
-# sharp, low-noise lines at pool scale (the pass shares the frame's ray
-# budgets and stays a flat per-frame cost however it is tuned).
-photons_per_frame = 24576
+# budget runs above the module default so the caustic net resolves sharp,
+# low-noise lines at pool scale (the pass shares the frame's ray budgets and
+# stays a flat per-frame cost however it is tuned).
+photons_per_frame = 8192
+# The pool water is ANIMATED: its focusing normals move every frame, so the
+# deposits must follow the wave phase. The module's 0.9 running mean freezes
+# the net into a stale smear under the moving waves; 0.72 keeps roughly a
+# three-frame mean - enough to average the photon noise, fresh enough that
+# the net rides the swells.
+temporal_blend = 0.72
+
+[radiance_cache.gather]
+# The exported gather field runs at the viewport's own resolution (field_scale
+# 1): a half- or quarter-resolution field spans several screen pixels per
+# texel, and even the smoothstep blend's texel boundaries read as a dot grid
+# wherever the shading is dark enough to resolve single-texel steps - the
+# stipple every zoomed-in shadow and every unlit face showed. Full
+# resolution halves nothing away: the field's texels line up with the frame's
+# pixels, the interpolation shrinks to a one-texel footprint, and the
+# stochastic variance the temporal filter averages drops with it. The per-
+# frame cost rides the module's evaluate budget (the governor scales the
+# texel work to the machine), so the quality step does not change the frame
+# contract.
+field_scale = 1
+# Shadowed regions show the gather's stochastic variance (the sun's signal
+# no longer masks it): a slightly longer temporal mean on both the field and
+# the screen probes trades a frame of lag for the smoothness shadows need.
+temporal_blend = 0.86
+probe_temporal_blend = 0.94
+
+[radiance_cache.lighting]
+# The cached-lighting refresh rate: the direct and indirect texel budgets
+# scale by this factor (on top of the quality preset). 0.35 keeps the
+# refresh flat and readable while the orbiting lights sweep their update
+# trail across the field - the showcase's moving-light story stays intact
+# at roughly a third of the default per-frame texel spend.
+update_speed = 0.35
+# The per-frame wall-clock budget for the whole GI evaluate: the adaptive
+# governor scales the texel budgets (never above the 0.35-scaled ceilings)
+# so the refresh rate fits THIS machine - a fast desktop refreshes more
+# texels per frame than the 2-core CI sandbox inside the same 6 ms. The
+# quality cost is refinement latency: the moving lights' GI trail settles
+# a few frames later instead of dropping the frame rate to a slideshow.
+update_budget_milliseconds = 6.0
 
 [renderer]
 clear_color = [0.012, 0.014, 0.028, 1.0]
@@ -87,19 +133,47 @@ reflection_indirect_specular = true
 sun_shadows                 = true
 sky_shadows                 = true
 shadow_map_resolution       = 2048
+# The sun's shadow filter radius: the blocker-aware disk widens itself with
+# the receiver's distance from the occluder (contact edges keep their
+# texel-scale crispness, far receivers grade across a broad penumbra), so
+# the configured value is the filter's floor - 6.5 texels lets the distant
+# penumbras reach the softness an extended sun disc photographs while the
+# contact band stays grounded.
+shadow_filter_radius        = 6.5
 bloom                       = true
 bloom_strength              = 0.28
 bloom_threshold             = 0.8
 
 [reflection_field]
 # One reflection surface per instance plus the ground tiles, mirroring the
-# GI registry capacity above. The field runs at half the default field
-# scale (1/2 instead of 1/4 of the viewport): the pool showcase's refracted
-# floor view and its caustic net resolve at the finer texel size - the
-# showcase spends its budget where it shows, and the per-frame tracing
-# budget keeps the evaluate cost flat at whatever scale runs. The base
-# setting halves the module default (the quality preset doubles the base,
-# so the field runs at half the viewport instead of a quarter).
+# GI registry capacity above. The field runs at the viewport's own
+# resolution (screen_scale 1): at half resolution the traced texels span
+# two screen pixels each, and the upsample's block boundaries read on every
+# mirror band - chrome balls, glass and the pool water carried visible
+# pixel squares even zoomed out. Full resolution puts one traced texel on
+# every screen pixel; the stride governor and the evaluate budget keep the
+# per-frame trace rate at THIS machine's cost, so the resolution step
+# spends convergence latency (a texel's fresh trace lands a few frames
+# later), not frame rate.
 screen_scale = 1
+# The near-mirror band (water, glass, chrome) traces this many jittered taps
+# per texel; 3 converges the close-up mirror response visibly faster (the
+# dynamic surfaces - the animated water - trace every frame and carry a short
+# temporal mean, so the extra tap is what buys them smoothness).
+mirror_band_taps = 3
+# The per-frame wall-clock budget for the whole reflection evaluate: the
+# adaptive stride governor interleaves the traced texels (the skipped ones
+# carry their reprojected temporal history; the phase rotation gives every
+# texel a fresh trace within 8 frames) so the trace rate fits THIS machine
+# inside 4.5 ms. The 0.99 temporal accumulation makes the interleave
+# visually free on the smooth surfaces that carry the traced response.
+update_budget_milliseconds = 6.0
 [reflection_field.scene]
 max_surfaces = 8192
+
+[camera]
+# First-person movement plane: WASD walks the horizontal plane while the
+# mouse pitch only steers the gaze (Space/Ctrl ride the height axis), so
+# looking down at the pool and pressing forward circles it instead of
+# diving into the water.
+fly_movement_follows_pitch = false

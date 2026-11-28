@@ -18,7 +18,6 @@ engine_add_application(
     SOURCES
     source/main.cpp
     source/planet_demo_options.cpp
-    source/planet_camera_input.cpp
     source/planet_chunk_renderer.cpp
     source/planet_demo_tests.cpp
     source/planet_benchmark.cpp

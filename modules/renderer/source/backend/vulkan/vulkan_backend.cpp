@@ -14,6 +14,7 @@
 
 #include <engine/direct_lighting/capabilities.hpp>
 #include <engine/pbr/capabilities.hpp>
+#include <engine/reflection_field/capabilities.hpp>
 #include <engine/renderer/capabilities.hpp>
 #include <engine/renderer/material.hpp>
 #include <engine/renderer/mesh.hpp>
@@ -163,9 +164,13 @@ bool sameDirectLights(const direct_lighting::DirectLight *lights, std::uint32_t 
 
 // Builds the std140 frame uniform: view-projection (with the Vulkan fixup),
 // camera position, sun/ambient/exposure/tone-mapper, the packed light
-// array with its active count, and the radiance_cache probe-grid header.
+// array with its active count, the radiance_cache probe-grid header, and
+// the reflection_field header (the field's own GL-convention camera, kept
+// unmodified so the shader projects through it exactly like the CPU's
+// sampleReflectionField).
 FrameUniformData makeFrameUniform(const CameraMatrices &camera, const pbr::PbrEnvironment &environment,
-    const DirectLightUniformData *packedLights, std::uint32_t lightCount, const ProbeGridUniformData &probeGrid)
+    const DirectLightUniformData *packedLights, std::uint32_t lightCount, const ProbeGridUniformData &probeGrid,
+    const glm::mat4 *fieldViewProjection, float fieldMaxRoughness, bool fieldActive)
 {
     FrameUniformData data;
     const glm::mat4  viewProj = vulkanClipFixup * glm::make_mat4(camera.projection) * glm::make_mat4(camera.view);
@@ -208,6 +213,14 @@ FrameUniformData makeFrameUniform(const CameraMatrices &camera, const pbr::PbrEn
         std::copy_n(packedLights, packedLightCount, data.directLights);
     }
     data.probeGrid = probeGrid;
+    if (fieldViewProjection != nullptr && fieldActive)
+    {
+        std::memcpy(data.fieldViewProj, glm::value_ptr(*fieldViewProjection), sizeof(data.fieldViewProj));
+        data.fieldMeta[0] = 0.0f; // filled by the caller with the live dimensions
+        data.fieldMeta[1] = 0.0f;
+        data.fieldMeta[2] = fieldMaxRoughness;
+        data.fieldMeta[3] = 1.0f; // active
+    }
     return data;
 }
 
@@ -367,6 +380,7 @@ std::unique_ptr<RenderBackend> VulkanBackend::create(window::WindowHandle surfac
             backend->framesInFlight_,
             backend->pipeline_->frameSetLayout(),
             backend->pipeline_->materialSetLayout(),
+            backend->pipeline_->materialExtensionSetLayout(),
             textureMipmapsEnabled,
             backend->anisotropyLevel_,
             maximumTextures,
@@ -858,12 +872,35 @@ void VulkanBackend::setProbeGrid(const GiProbeGrid &grid)
     frameUniformDirty_ = true; // the header rides the frame uniform
 }
 
-// The reflection field composite runs in the software rasterizer; see
-// docs/backends.md ("Behavior parity") for the scope note. The hook stays
-// complete on this side so renderer.cpp's version polling is backend-agnostic.
+// The reflection_field composite: the borrowed snapshot is copied into the
+// pending buffer here (between frames, while previous frames may still be
+// executing), and the recording slot's staging write + image copy happen in
+// beginFrame once that slot has retired. The header (the field's own camera
+// plus the max-traced roughness) rides the frame uniform.
 void VulkanBackend::setReflectionField(const ReflectionField &field)
 {
-    (void) field;
+    if (!field.valid())
+    {
+        return;
+    }
+    const std::size_t texelCount = static_cast<std::size_t>(field.header.width) * field.header.height;
+    const std::size_t floatCount = texelCount * reflection_field::reflectionFieldTexelFloats;
+    try
+    {
+        pendingReflectionField_.resize(floatCount);
+    }
+    catch (const std::bad_alloc &)
+    {
+        return; // keep the previous snapshot; the next call retries
+    }
+    std::memcpy(pendingReflectionField_.data(), field.radiance, floatCount * sizeof(float));
+    pendingFieldWidth_        = field.header.width;
+    pendingFieldHeight_       = field.header.height;
+    pendingFieldMaxRoughness_ = field.header.maxRoughness;
+    fieldViewProjection_      = glm::make_mat4(field.header.viewProjection);
+    fieldUniformHeaderValid_  = true;
+    ++pendingFieldRevision_;
+    frameUniformDirty_        = true;
 }
 
 // The gather field composite runs in the software rasterizer too (the same
@@ -918,6 +955,7 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     }
 
     drainDeferredDestroys(frames_->currentFrame());
+    resources_->tickFrame(); // retires resized reflection-field images
 
     // Deferred export completion (H2): the copy recorded on this slot is
     // provably complete after the slot-retirement wait above, so the file
@@ -929,11 +967,59 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
         instanceBuffers_[frames_->currentFrame()].cursor = sizeof(float) * 16u;
     }
 
+    // reflection_field staging: the slot has retired, so its staging buffer
+    // is provably idle; a field revision this slot's image does not hold yet
+    // is copied now and its image upload recorded below (before the render
+    // pass). A staging failure keeps the previous revision and deactivates
+    // the hook for this frame's uniform.
+    bool fieldStaged = false;
+    if (pendingFieldRevision_ != 0 && !pendingReflectionField_.empty()
+        && !resources_->reflectionFieldCurrent(frames_->currentFrame(), pendingFieldRevision_))
+    {
+        if (resources_->ensureReflectionFieldImages(pendingFieldWidth_, pendingFieldHeight_)
+            && resources_->stageReflectionField(frames_->currentFrame(), pendingReflectionField_.data(),
+                   pendingFieldWidth_, pendingFieldHeight_, pendingFieldRevision_))
+        {
+            fieldStaged = true;
+        }
+        else
+        {
+            std::fprintf(stderr,
+                "renderer module: could not stage the reflection field; this frame keeps the previous one\n");
+        }
+    }
+    const bool fieldUsable = fieldStaged
+        || resources_->reflectionFieldCurrent(frames_->currentFrame(), pendingFieldRevision_);
+
     if (frameUniformDirty_)
     {
-        cachedFrameUniform_ = makeFrameUniform(
-            camera_, environment_, packedDirectLights_.data(), directLightCount_, packedProbeGrid_);
+        cachedFrameUniform_ = makeFrameUniform(camera_,
+            environment_,
+            packedDirectLights_.data(),
+            directLightCount_,
+            packedProbeGrid_,
+            fieldUniformHeaderValid_ ? &fieldViewProjection_ : nullptr,
+            pendingFieldMaxRoughness_,
+            fieldUsable);
+        if (fieldUsable)
+        {
+            cachedFrameUniform_.fieldMeta[0] = static_cast<float>(pendingFieldWidth_);
+            cachedFrameUniform_.fieldMeta[1] = static_cast<float>(pendingFieldHeight_);
+        }
         frameUniformDirty_  = false;
+        ++frameUniformRevision_;
+    }
+    else if (fieldUsable && cachedFrameUniform_.fieldMeta[3] < 0.5f)
+    {
+        // The uniform was cached before any field arrived; the first usable
+        // field re-activates the header without a full rebuild.
+        cachedFrameUniform_.fieldMeta[0] = static_cast<float>(pendingFieldWidth_);
+        cachedFrameUniform_.fieldMeta[1] = static_cast<float>(pendingFieldHeight_);
+        cachedFrameUniform_.fieldMeta[2] = pendingFieldMaxRoughness_;
+        cachedFrameUniform_.fieldMeta[3] = 1.0f;
+        std::memcpy(cachedFrameUniform_.fieldViewProj,
+            glm::value_ptr(fieldViewProjection_),
+            sizeof(cachedFrameUniform_.fieldViewProj));
         ++frameUniformRevision_;
     }
     if (!resources_->updateFrameUniform(frames_->currentFrame(), cachedFrameUniform_, frameUniformRevision_))
@@ -1089,18 +1175,25 @@ void VulkanBackend::beginFrame(const FrameParameters &frame)
     // The slot's previous command buffer completed during the slot wait, so
     // staging buffers it referenced can die now; any vertex updates parked
     // between frames record their copies before the render pass begins, so
-    // every draw this frame binds the freshest simulated geometry.
+    // every draw this frame binds the freshest simulated geometry. The
+    // reflection-field copy rides the same pre-render-pass window.
     retireDynamicMeshStaging(frames_->currentFrame());
     retireOverlayBuffers(frames_->currentFrame());
     flushPendingMeshUpdates();
+    resources_->recordReflectionFieldUpload(frames_->currentFrame(), command);
+    // The frame's material-extension ring starts empty (the slot's previous
+    // command buffer completed during the slot wait, so its blocks are free).
+    resources_->resetMaterialExtensions(frames_->currentFrame());
 
     hasLastPushConstants_       = false;
     lastBoundPipeline_          = BoundPipeline::Mesh;
     lastMeshDepthWrite_         = true;
     lastMeshTwoSided_           = false;
-    lastMeshTransparent_       = false;
+    lastMeshCwWinding_          = false;
+    lastMeshTransparent_        = false;
     lastBoundMesh_              = invalidMesh;
     lastBoundMaterialSet_       = VK_NULL_HANDLE;
+    lastMaterialExtensionOffset_ = 0xFFFFFFFFu;
     lastBoundInstanceOffset_    = 0;
     hasLastBoundInstanceBuffer_ = false;
     hasLastFurPushConstants_    = false;
@@ -1244,47 +1337,32 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
     }
 
     VkCommandBuffer command = frames_->commandBuffer();
-    // The mesh pipeline has four variant axes: a depth-write twin for
-    // backdrop materials (depthWrite off) and a two-sided twin for cloth
+    // The mesh pipeline family has four variant axes (see meshPipeline()):
+    // a depth-write twin for backdrop materials, a two-sided twin for cloth
     // materials (doubleSided on: cull mode NONE, the fragment stage flips
-    // back-facing normals), plus the transparent pair for materials whose
-    // opacity is below 1 (src-alpha blending, depth write OFF - the
-    // transparent pass the material contract documents; mesh.frag already
-    // writes oColor.a for this blend). Same shaders and layout, depth testing
-    // stays on; switching variants pushes its constants again, like a fur
-    // switch does.
+    // back-facing normals), a clockwise-front twin for materials that
+    // declare the mirrored winding convention (MeshMaterial::
+    // frontFaceWinding < 0), and an alpha-blended twin for transparent
+    // materials (opacity below 1 - the software rasterizer's transparent
+    // commit, which also forces depth writes off; doubleSided draws ignore
+    // the declared winding, the rasterizer's twin rule). Same shaders and
+    // layout, depth testing stays on; switching variants pushes its
+    // constants again, like a fur switch does.
     const bool wantTransparent = material.opacity < 1.0f;
-    // Transparent draws never write depth (the material contract: depth
-    // writes stay off below opacity 1 so co-transmitted surfaces do not
-    // occlude each other).
-    const bool wantDepthWrite = material.depthWrite && !wantTransparent;
-    const bool wantTwoSided   = material.doubleSided;
+    const bool wantDepthWrite  = material.depthWrite && !wantTransparent;
+    const bool wantTwoSided    = material.doubleSided;
+    const bool wantCwWinding   = material.frontFaceWinding < 0.0f && !wantTwoSided;
     if (lastBoundPipeline_ != BoundPipeline::Mesh || lastMeshDepthWrite_ != wantDepthWrite
-        || lastMeshTwoSided_ != wantTwoSided || lastMeshTransparent_ != wantTransparent)
+        || lastMeshTwoSided_ != wantTwoSided || lastMeshCwWinding_ != wantCwWinding
+        || lastMeshTransparent_ != wantTransparent)
     {
         // A fur draw (or another mesh variant) last bound a different
         // pipeline; bind the variant this material needs. Push constants
         // must be pushed again: the fur path wrote 128 bytes through its own
         // layout, and relying on the stale first-112-bytes equality across
-        // layout switches is not worth the branch savings. Set 0 rebinds
-        // with it: the overlay layout owns set 0 for its pass (and the fur
-        // layout's set 0 is a different set entirely), and beginFrame is the
-        // only other mesh-path set-0 bind. The fur push-constant cache
-        // clears for the same reason as the mesh one below it: the shared
-        // push-constant bytes now carry this layout's data.
-        VkPipeline pipelineVariant = VK_NULL_HANDLE;
-        if (wantTransparent)
-        {
-            pipelineVariant = wantTwoSided ? pipeline_->pipelineTransparentTwoSided() : pipeline_->pipelineTransparent();
-        }
-        else if (wantTwoSided)
-        {
-            pipelineVariant = wantDepthWrite ? pipeline_->pipelineTwoSided() : pipeline_->pipelineTwoSidedNoDepthWrite();
-        }
-        else
-        {
-            pipelineVariant = wantDepthWrite ? pipeline_->pipeline() : pipeline_->pipelineNoDepthWrite();
-        }
+        // layout switches is not worth the branch savings.
+        const VkPipeline pipelineVariant
+            = pipeline_->meshPipeline(wantDepthWrite, wantTwoSided, wantCwWinding, wantTransparent);
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineVariant);
         vkCmdBindDescriptorSets(command,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1308,10 +1386,11 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
             const VkRect2D scissor{{0, 0}, {width, height}};
             vkCmdSetScissor(command, 0, 1, &scissor);
         }
-        lastBoundPipeline_       = BoundPipeline::Mesh;
-        lastMeshDepthWrite_      = wantDepthWrite;
-        lastMeshTwoSided_        = wantTwoSided;
-        lastMeshTransparent_     = wantTransparent;
+        lastBoundPipeline_      = BoundPipeline::Mesh;
+        lastMeshDepthWrite_     = wantDepthWrite;
+        lastMeshTwoSided_       = wantTwoSided;
+        lastMeshCwWinding_      = wantCwWinding;
+        lastMeshTransparent_    = wantTransparent;
         hasLastPushConstants_   = false;
         hasLastFurPushConstants_ = false;
     }
@@ -1377,6 +1456,25 @@ void VulkanBackend::drawMesh(MeshHandle mesh, const float *modelMatrix, const Me
         vkCmdBindDescriptorSets(
             command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->pipelineLayout(), 1, 1, &materialSet, 0, nullptr);
         lastBoundMaterialSet_ = materialSet;
+    }
+    // The material extension block (set 2): the draw's fog/mottle/detail
+    // tuple at its dynamic offset. Extension-less materials share block 0.
+    {
+        const std::uint32_t extensionOffset
+            = resources_->acquireMaterialExtension(frames_->currentFrame(), material);
+        if (extensionOffset != lastMaterialExtensionOffset_)
+        {
+            const VkDescriptorSet extensionSet = resources_->materialExtensionSet(frames_->currentFrame());
+            vkCmdBindDescriptorSets(command,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline_->pipelineLayout(),
+                2,
+                1,
+                &extensionSet,
+                1,
+                &extensionOffset);
+            lastMaterialExtensionOffset_ = extensionOffset;
+        }
     }
 
     if (mesh != lastBoundMesh_)
@@ -1526,33 +1624,24 @@ void VulkanBackend::drawMeshInstances(
     {
         VkCommandBuffer command = frames_->commandBuffer();
         // Instanced draws select the mesh pipeline variant from the material
-        // exactly like drawMesh does (depth-write, two-sided and transparent
+        // exactly like drawMesh does - the same four-axis meshPipeline()
+        // selector (depth-write, two-sided, declared-winding and transparent
         // twins), so a mixed draw list never binds a stale variant from a
-        // previous call.
+        // previous call and a CW-winding material instanced after a
+        // front-face material still gets its mirrored front face.
         const bool wantTransparent = material.opacity < 1.0f;
         const bool wantDepthWrite = material.depthWrite && !wantTransparent;
         const bool wantTwoSided   = material.doubleSided;
+        const bool wantCwWinding = material.frontFaceWinding < 0.0f && !wantTwoSided;
         if (lastBoundPipeline_ != BoundPipeline::Mesh || lastMeshDepthWrite_ != wantDepthWrite
-            || lastMeshTwoSided_ != wantTwoSided || lastMeshTransparent_ != wantTransparent)
+            || lastMeshTwoSided_ != wantTwoSided || lastMeshCwWinding_ != wantCwWinding
+            || lastMeshTransparent_ != wantTransparent)
         {
             // See drawMesh's switch block: set 0 (the frame uniform) and the
             // shared push-constant bytes come back with the pipeline - the
             // overlay/fur layouts owned both while they ran.
-            VkPipeline pipelineVariant = VK_NULL_HANDLE;
-            if (wantTransparent)
-            {
-                pipelineVariant
-                    = wantTwoSided ? pipeline_->pipelineTransparentTwoSided() : pipeline_->pipelineTransparent();
-            }
-            else if (wantTwoSided)
-            {
-                pipelineVariant
-                    = wantDepthWrite ? pipeline_->pipelineTwoSided() : pipeline_->pipelineTwoSidedNoDepthWrite();
-            }
-            else
-            {
-                pipelineVariant = wantDepthWrite ? pipeline_->pipeline() : pipeline_->pipelineNoDepthWrite();
-            }
+            const VkPipeline pipelineVariant
+                = pipeline_->meshPipeline(wantDepthWrite, wantTwoSided, wantCwWinding, wantTransparent);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineVariant);
             vkCmdBindDescriptorSets(command,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1575,6 +1664,7 @@ void VulkanBackend::drawMeshInstances(
             lastBoundPipeline_       = BoundPipeline::Mesh;
             lastMeshDepthWrite_      = wantDepthWrite;
             lastMeshTwoSided_        = wantTwoSided;
+            lastMeshCwWinding_       = wantCwWinding;
             lastMeshTransparent_     = wantTransparent;
             hasLastPushConstants_    = false;
             hasLastFurPushConstants_ = false;
@@ -1624,6 +1714,24 @@ void VulkanBackend::drawMeshInstances(
                 0,
                 nullptr);
             lastBoundMaterialSet_ = materialSet;
+        }
+        // The material extension block (set 2; see drawMesh's twin block).
+        {
+            const std::uint32_t extensionOffset
+                = resources_->acquireMaterialExtension(frames_->currentFrame(), material);
+            if (extensionOffset != lastMaterialExtensionOffset_)
+            {
+                const VkDescriptorSet extensionSet = resources_->materialExtensionSet(frames_->currentFrame());
+                vkCmdBindDescriptorSets(command,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    pipeline_->pipelineLayout(),
+                    2,
+                    1,
+                    &extensionSet,
+                    1,
+                    &extensionOffset);
+                lastMaterialExtensionOffset_ = extensionOffset;
+            }
         }
         if (mesh != lastBoundMesh_)
         {
@@ -3044,6 +3152,17 @@ void VulkanBackend::destroyMesh(MeshHandle mesh)
 bool VulkanBackend::createTexture(TextureHandle id, const TextureDescription &description, RenderError *error)
 {
     return resources_->createTexture(id, description, error);
+}
+
+bool VulkanBackend::createBlockTexture(TextureHandle id, const BlockTextureDescription &description,
+    RenderError *error)
+{
+    return resources_->createBlockTexture(id, description, error);
+}
+
+BlockTextureFormatSupport VulkanBackend::blockFormatSupport() const
+{
+    return resources_ != nullptr ? resources_->blockFormatSupport() : BlockTextureFormatSupport{};
 }
 
 void VulkanBackend::destroyTexture(TextureHandle texture)

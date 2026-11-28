@@ -16,6 +16,7 @@
 #include <engine/renderer/mesh.hpp>
 #include <engine/window/capabilities.hpp>
 #include "render_errors.hpp"
+#include "render_shared.hpp"
 
 #include <cstdint>
 
@@ -69,9 +70,9 @@ public:
     // The reflection_field screen-space field snapshot for the indirect
     // specular hook. The view is borrowed only for this call. An invalid/
     // empty field disables the hook and keeps the pre-hook shading. The
-    // composite currently runs in the software rasterizer; the Vulkan path
-    // consumes the module through its exported field (copyField) - see
-    // docs/backends.md.
+    // headless backend samples the field per pixel (reflection_field_sampling.hpp);
+    // the Vulkan backend uploads it into per-frame images that mesh.frag
+    // composites (see docs/backends.md).
     virtual void setReflectionField(const ReflectionField &field) = 0;
 
     // The radiance_cache screen-space gather field snapshot for the final
@@ -167,6 +168,32 @@ public:
     }
 
     virtual bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error) = 0;
+
+    // Which block formats createBlockTexture accepts. The headless backend
+    // software-decodes every format (bcdec), the Vulkan backend uploads
+    // whichever formats the device samples natively; the module core asks
+    // before transcoding a KTX file so the payload lands on the native
+    // path whenever the machine has one.
+    [[nodiscard]] virtual BlockTextureFormatSupport blockFormatSupport() const
+    {
+        return {};
+    }
+
+    // Block-compressed texture creation (the KTX path): every mip level's
+    // block bytes concatenated, with per-level sizes; the mip chain comes
+    // from the file, so no GPU blit pass is involved. Default reports
+    // Unsupported so a backend without block support stays interface-
+    // complete; the module core falls back to the RGBA path when
+    // blockFormatSupport() reports nothing.
+    virtual bool createBlockTexture(
+        TextureHandle id, const BlockTextureDescription &description, RenderError *error)
+    {
+        (void)id;
+        (void)description;
+        reportError(error, RenderError::Unsupported);
+        return false;
+    }
+
     virtual void destroyTexture(TextureHandle texture)                                                      = 0;
 
     virtual FrameStatistics statistics() const = 0;

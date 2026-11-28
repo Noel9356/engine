@@ -20,6 +20,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -121,6 +122,28 @@ ENGINE_SHADING_INLINE bool sampleGatherField(const PreparedGatherField &field, c
     }
     const float u = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(field.width) - 0.5f;
     const float v = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(field.height) - 0.5f;
+    // Per-point stochastic sample offset (up to half a texel, world-anchored
+    // hash): the field is a texel lattice, and every pixel reading it at the
+    // exact projected texel center keeps whatever correlation the field's own
+    // pipeline (screen probes at a stride, the bilateral filter's kernel
+    // pitch, validity renormalization) bakes into that lattice - a faint
+    // screen-pitch stipple on broad dark flats even through the smoothstep
+    // blend. Offsetting every sample by an independent sub-texel amount
+    // decorrelates neighboring pixels' reads: the lattice becomes noise the
+    // eye averages instead of a pattern it traces. Deterministic in the
+    // world position, so a converged frame stays bit-stable and nothing
+    // shimmers; the offset never moves a sample more than half a texel, so
+    // contact-scale structure (the meet-line darkening the field resolves)
+    // keeps its position within one field texel.
+    const float gatherHash = std::fmod(
+        std::sin(worldPosition.x * 41.631f + worldPosition.y * 23.137f + worldPosition.z * 7.543f) * 17341.2589f,
+        1.0f);
+    const float gatherHash01 = gatherHash - std::floor(gatherHash);
+    const float jitterU      = gatherHash01 - 0.5f;
+    const float secondHash   = gatherHash01 * 7.61f + 0.37f;
+    const float jitterV      = (secondHash - std::floor(secondHash)) - 0.5f;
+    const float uj = u + jitterU;
+    const float vj = v + jitterV;
     // Conjunction form (all four comparisons must HOLD): a NaN coordinate
     // fails `u >= 0.0f` and is rejected, while the disjunction form it
     // replaces (`u < 0.0f || ...`) lets NaN slip through every comparison
@@ -128,17 +151,24 @@ ENGINE_SHADING_INLINE bool sampleGatherField(const PreparedGatherField &field, c
     // a finite matrix when extreme world positions overflow the projection
     // and the terms cancel (Inf - Inf), so the belt stays even though
     // prepareGatherField gates the matrix itself.
-    if (!(u >= 0.0f && v >= 0.0f && u <= static_cast<float>(field.width) - 1.0f
-            && v <= static_cast<float>(field.height) - 1.0f))
+    if (!(uj >= 0.0f && vj >= 0.0f && uj <= static_cast<float>(field.width) - 1.0f
+            && vj <= static_cast<float>(field.height) - 1.0f))
     {
         return false;
     }
-    const std::uint32_t x0 = static_cast<std::uint32_t>(std::floor(u));
-    const std::uint32_t y0 = static_cast<std::uint32_t>(std::floor(v));
+    const std::uint32_t x0 = static_cast<std::uint32_t>(std::floor(uj));
+    const std::uint32_t y0 = static_cast<std::uint32_t>(std::floor(vj));
     const std::uint32_t x1 = std::min(x0 + 1u, field.width - 1u);
     const std::uint32_t y1 = std::min(y0 + 1u, field.height - 1u);
-    const float       fx = u - static_cast<float>(x0);
-    const float       fy = v - static_cast<float>(y0);
+    // Smoothstep per axis: the field spans field_scale screen pixels per
+    // texel, and plain bilinear weights carry the texel's diamond as a
+    // screen-aligned lattice at exactly that pitch (the grid read every
+    // broad flat shows). The curve keeps the blend's endpoints while making
+    // the joins C1, hiding the tile without blurring the content.
+    const float       fxRaw = uj - static_cast<float>(x0);
+    const float       fyRaw = vj - static_cast<float>(y0);
+    const float       fx = fxRaw * fxRaw * (3.0f - 2.0f * fxRaw);
+    const float       fy = fyRaw * fyRaw * (3.0f - 2.0f * fyRaw);
     const auto texelAt = [&field](std::uint32_t x, std::uint32_t y, bool &valid, float &occlusion)
     {
         const float *texel = field.irradiance

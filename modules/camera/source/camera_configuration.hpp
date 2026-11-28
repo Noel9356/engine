@@ -50,6 +50,7 @@ struct CameraDefaults
     float             sprintMultiplier    = builtInSprintMultiplier;
     float             maximumDeltaSeconds = builtInMaximumDeltaSeconds;
     float             pitchLimitDegrees   = builtInPitchLimitDegrees;
+    bool              flyMovementFollowsPitch = true;
     std::size_t       maximumCameras      = builtInMaximumCameras;
 };
 

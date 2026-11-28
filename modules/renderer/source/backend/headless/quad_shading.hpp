@@ -46,6 +46,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 
 // The scalar fallback stays reachable on every platform (and testable - the
@@ -186,7 +187,7 @@ inline void toneMapSoA(__m128 &x, __m128 &y, __m128 &z, pbr::ToneMapping mapper)
 // Force-inlined like the per-pixel kernels: an outlined call would turn the
 // RunInputs marshalling into a real stack round-trip per run.
 ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 position[3], const glm::vec3 normal[3],
-    const glm::vec3 color[3], const RunInputs &inputs, glm::vec3 *outShaded)
+    const glm::vec3 color[3], const RunInputs &inputs, glm::vec3 *outShaded, glm::vec3 *outEnvSpecular)
 {
 #if ENGINE_SHADING_RUN_SIMD
     // ---- lane state ------------------------------------------------------------
@@ -413,8 +414,67 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
         _mm_mul_ps(albY, metallic));
     const __m128 f0Z = _mm_add_ps(_mm_mul_ps(_mm_set1_ps(dielectricF0.z), oneMinusMetallic),
         _mm_mul_ps(albZ, metallic));
-    // diffuse = albedo * ((1 - metallic) * invPi); no opacity factor (see the
-    // ambient block's note - the commit applies the blend once).
+
+    // ---- pbrShade: analytic environment specular (pbrEnvSpecular's SoA twin) ---
+    // reflected = 2 * nDotV * n - view; roughness blurs the lobe toward the
+    // hemispheric mean; the split-sum fit weighs f0 and the white tail. The
+    // result rides the run's color AND is exported through outEnvSpecular so
+    // the caller's traced reflection field can replace it per lane (the
+    // per-sample path's envSpecularScale handoff, subtracted after the
+    // field sample answers - see commitRunLane).
+    __m128 envSpecX;
+    __m128 envSpecY;
+    __m128 envSpecZ;
+    {
+        const __m128 twoNDotV = _mm_mul_ps(nDotV, _mm_set1_ps(2.0f));
+        const __m128 reflX = _mm_sub_ps(_mm_mul_ps(nrmX, twoNDotV), viewX);
+        const __m128 reflY = _mm_sub_ps(_mm_mul_ps(nrmY, twoNDotV), viewY);
+        const __m128 reflZ = _mm_sub_ps(_mm_mul_ps(nrmZ, twoNDotV), viewZ);
+        const __m128 blur = _mm_mul_ps(roughness, roughness);
+        const __m128 lobeRaw = _mm_add_ps(_mm_mul_ps(reflY, _mm_set1_ps(0.5f)), _mm_set1_ps(0.5f));
+        const __m128 lobeUp = _mm_add_ps(_mm_mul_ps(lobeRaw, _mm_sub_ps(_mm_set1_ps(1.0f), blur)),
+            _mm_mul_ps(_mm_set1_ps(0.5f), blur));
+        const __m128 invLobeUp = _mm_sub_ps(_mm_set1_ps(1.0f), lobeUp);
+        const __m128 radianceX = _mm_add_ps(
+            _mm_mul_ps(_mm_set1_ps(context.ambientGround.x), invLobeUp),
+            _mm_mul_ps(_mm_set1_ps(context.ambientSky.x), lobeUp));
+        const __m128 radianceY = _mm_add_ps(
+            _mm_mul_ps(_mm_set1_ps(context.ambientGround.y), invLobeUp),
+            _mm_mul_ps(_mm_set1_ps(context.ambientSky.y), lobeUp));
+        const __m128 radianceZ = _mm_add_ps(
+            _mm_mul_ps(_mm_set1_ps(context.ambientGround.z), invLobeUp),
+            _mm_mul_ps(_mm_set1_ps(context.ambientSky.z), lobeUp));
+        // The split-sum fit (see pbrEnvSpecular): r = roughness * x + y.
+        const __m128 rX = _mm_add_ps(_mm_mul_ps(roughness, _mm_set1_ps(-1.0f)), _mm_set1_ps(1.0f));
+        const __m128 rY = _mm_add_ps(_mm_mul_ps(roughness, _mm_set1_ps(-0.0275f)), _mm_set1_ps(0.0425f));
+        const __m128 rZ = _mm_add_ps(_mm_mul_ps(roughness, _mm_set1_ps(-0.572f)), _mm_set1_ps(1.04f));
+        const __m128 rW = _mm_add_ps(_mm_mul_ps(roughness, _mm_set1_ps(0.022f)), _mm_set1_ps(-0.04f));
+        // exp(-9.28 * nDotV) - the SSE path has no vector exp, so evaluate
+        // per lane (four scalar exp calls per run).
+        alignas(16) float nDotVLane[4];
+        alignas(16) float rXLane[4];
+        alignas(16) float rYLane[4];
+        alignas(16) float a004Lane[4];
+        _mm_store_ps(nDotVLane, nDotV);
+        _mm_store_ps(rXLane, rX);
+        _mm_store_ps(rYLane, rY);
+        for (int lane = 0; lane < 4; ++lane)
+        {
+            a004Lane[lane] = std::min(rXLane[lane] * rXLane[lane], std::exp(-9.28f * nDotVLane[lane])) * rXLane[lane]
+                + rYLane[lane];
+        }
+        const __m128 a004 = _mm_load_ps(a004Lane);
+        const __m128 abX = _mm_add_ps(_mm_mul_ps(a004, _mm_set1_ps(-1.04f)), rZ);
+        const __m128 abY = _mm_add_ps(_mm_mul_ps(a004, _mm_set1_ps(1.04f)), rW);
+        const __m128 envScale = _mm_mul_ps(occlusion, skyVisible);
+        envSpecX = _mm_mul_ps(_mm_mul_ps(radianceX, _mm_add_ps(_mm_mul_ps(f0X, abX), abY)), envScale);
+        envSpecY = _mm_mul_ps(_mm_mul_ps(radianceY, _mm_add_ps(_mm_mul_ps(f0Y, abX), abY)), envScale);
+        envSpecZ = _mm_mul_ps(_mm_mul_ps(radianceZ, _mm_add_ps(_mm_mul_ps(f0Z, abX), abY)), envScale);
+        resultX = _mm_add_ps(resultX, envSpecX);
+        resultY = _mm_add_ps(resultY, envSpecY);
+        resultZ = _mm_add_ps(resultZ, envSpecZ);
+    }
+    // diffuse = albedo * ((1 - metallic) * invPi) * opacity.
     const __m128 invPi = _mm_set1_ps(1.0f / glm::pi<float>());
     const __m128 diffuseTermX = _mm_mul_ps(albX, _mm_mul_ps(oneMinusMetallic, invPi));
     const __m128 diffuseTermY = _mm_mul_ps(albY, _mm_mul_ps(oneMinusMetallic, invPi));
@@ -502,9 +562,19 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
     _mm_store_ps(outX, resultX);
     _mm_store_ps(outY, resultY);
     _mm_store_ps(outZ, resultZ);
+    alignas(16) float envX[4];
+    alignas(16) float envY[4];
+    alignas(16) float envZ[4];
+    _mm_store_ps(envX, envSpecX);
+    _mm_store_ps(envY, envSpecY);
+    _mm_store_ps(envZ, envSpecZ);
     for (int lane = 0; lane < 4; ++lane)
     {
         outShaded[lane] = glm::vec3(outX[lane], outY[lane], outZ[lane]);
+        if (outEnvSpecular != nullptr)
+        {
+            outEnvSpecular[lane] = glm::vec3(envX[lane], envY[lane], envZ[lane]);
+        }
     }
 #else
     // Scalar fallback: replicate the per-sample path exactly by calling the
@@ -598,6 +668,20 @@ ENGINE_SHADING_INLINE void shadeRun4(const RunContext &context, const glm::vec3 
             giSample.valid ? &giSample : nullptr),
             context.toneMapInside ? context.exposure : 1.0f,
             context.toneMapInside ? context.toneMapping : pbr::ToneMapping::None);
+        // The analytic environment specular pbrShade just added, exported so
+        // the caller's traced reflection field can replace it per lane (see
+        // the SoA branch's outEnvSpecular twin). The occlusion-skyVisibility
+        // product matches the SoA branch's envScale (the per-sample path
+        // pre-scales the ambient pair the same way before pbrShade).
+        if (outEnvSpecular != nullptr)
+        {
+            const glm::vec3 view = glm::normalize(context.cameraPosition - interpolatedPosition);
+            const float     nDotV = std::max(glm::dot(shadingNormal, view), 1.0e-4f);
+            const float     clampedRoughness = std::clamp(inputs.roughness[lane], minimumRoughness, 1.0f);
+            const glm::vec3 f0 = glm::mix(dielectricF0, albedo, inputs.metallic[lane]);
+            outEnvSpecular[lane] = pbrEnvSpecular(shadingNormal, view, clampedRoughness, f0, nDotV,
+                context.ambientSky, context.ambientGround, inputs.occlusion[lane] * inputs.skyVisibility[lane]);
+        }
     }
 #endif
 }

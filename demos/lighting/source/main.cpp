@@ -24,6 +24,8 @@
 
 #include "demo_environment.hpp"
 
+#include "demo_camera_input.hpp"
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -276,24 +278,52 @@ int main()
         }
 
         // ---- the frame loop ----------------------------------------------
-        // Headless runs pace a fixed frame delta (deterministic captures);
-        // windowed runs use the wall clock, clamped like the planet demo.
-        const double        frameDelta = 1.0 / 30.0;
-        auto               lastWallClock = std::chrono::steady_clock::now();
+        // Headless runs pace a fixed frame delta (deterministic captures)
+        // and never wall-clock throttle; windowed runs use the wall clock
+        // (clamped like the planet demo) and pace to the configured frame
+        // limit (engine.max_fps, 60 by default) whenever the presentation
+        // path itself does not already pace the loop.
+        const double frameDelta = 1.0 / 30.0;
+        auto          lastWallClock = std::chrono::steady_clock::now();
+        const std::int64_t maxFps
+            = context.configurationIntegerInSection("engine", "max_fps").value_or(60);
+        const bool headless = backendName.find("headless") != std::string::npos;
+        const bool presentedPacing = renderCapability.waitsForPresentation != nullptr
+            && renderCapability.waitsForPresentation(renderCapability.self, rendererHandle);
         engine::FramePacer framePacer;
         harness::FrameTimingRecorder frameTiming;
         frameTiming.setAutoFlushPath(options.frameTimesPath);
         std::vector<window::WindowEvent> eventBuffer(64);
 
-            const bool  headless = backendName.find("headless") != std::string::npos;
-            std::uint32_t framesRendered = 0;
-            const std::uint32_t totalFrames = headless ? options.frames : 0u;
-            bool          screenshotTaken = options.screenshotPath.empty();
-            const std::uint32_t screenshotFrame
-                = options.screenshotFrame == 0xffffffffu ? totalFrames - 1u : options.screenshotFrame;
-            double        simSeconds   = 0.0;
-            const bool    windowedRun  = !headless;
-            std::uint64_t frameIndex   = 0;
+        // The frame limiter resolves after the window exists (the display
+        // query needs it). engine.max_fps > 0 caps the loop at that rate and
+        // 0 caps it at the display's refresh rate; headless capture runs
+        // stay unthrottled (see applyFramePaceTarget).
+        double monitorRefreshHz = 0.0;
+        if (windowCapability.getWindowAttributes != nullptr)
+        {
+            window::WindowAttributes windowAttributes;
+            if (windowCapability.getWindowAttributes(windowCapability.self, windowHandle, &windowAttributes))
+            {
+                monitorRefreshHz = windowAttributes.monitorRefreshRateHz;
+            }
+        }
+        // The resolved pace target (engine.max_fps contract); the pacer is a
+        // no-op while the target is 0 (headless capture runs, or vsync
+        // already pacing the loop at the display rate).
+        const double effectiveTargetHz = harness::applyFramePaceTarget(
+            framePacer, !headless, std::max<std::int64_t>(maxFps, 0), presentedPacing, monitorRefreshHz,
+            "demo_lighting");
+        (void)effectiveTargetHz;
+
+        std::uint32_t framesRendered = 0;
+        const std::uint32_t totalFrames = headless ? options.frames : 0u;
+        bool          screenshotTaken = options.screenshotPath.empty();
+        const std::uint32_t screenshotFrame
+            = options.screenshotFrame == 0xffffffffu ? totalFrames - 1u : options.screenshotFrame;
+        double        simSeconds   = 0.0;
+        const bool    windowedRun  = !headless;
+        std::uint64_t frameIndex   = 0;
         // The active camera framing: the startup DEMO_VIEW choice, then
         // whatever the 1..3 keys switch to (the framings share the scene;
         // only the camera path changes).
@@ -302,10 +332,21 @@ int main()
         std::uint64_t screenshotIndex = 0;
         if (windowedRun)
         {
-            std::cout << "demo_lighting: controls - mouse looks, WASD moves, Space rises, Ctrl descends,\n"
-                         "      Shift sprints, 1..3 switch framings (field/showcase/pool), F12 saves a screenshot,\n"
-                         "      Escape quits\n";
+            std::cout << "demo_lighting: controls - mouse looks (LeftAlt releases the cursor), WASD walks,\n"
+                         "      Space rises, Ctrl descends, Shift sprints, 1..3 switch framings (field/showcase/pool),\n"
+                         "      F12 saves a screenshot, Escape quits\n";
         }
+
+        // The shared interactive-camera input (cursor capture + raw mouse
+        // deltas through the camera module's degrees-per-pixel look path).
+        demo::harness::DemoCameraInput cameraInput(
+            windowCapability, windowHandle, windowedRun, windowedRun);
+        // The 1..3 keys re-frame the free camera: the next update applies the
+        // view's pose once through setLookAt, then manual flight continues.
+        bool applyViewPose = true;
+        // Rolling wall-clock frame rate for the periodic stats line.
+        auto        fpsWindowStart    = std::chrono::steady_clock::now();
+        std::uint64_t fpsWindowFrames = 0;
 
         for (; windowedRun || framesRendered < totalFrames + options.warmupFrames; ++frameIndex)
         {
@@ -315,40 +356,36 @@ int main()
             }
             frameTiming.beginFrame();
             windowCapability.pollEvents(windowCapability.self);
-            double cursorDeltaX = 0.0;
-            double cursorDeltaY = 0.0;
             harness::drainWindowEvents(windowCapability, windowHandle, eventBuffer,
                 [&](const window::WindowEvent &event)
                 {
-                    if (event.kind == window::WindowEventKind::CursorMoved)
+                    // The in-app controls beyond camera movement: F12 saves
+                    // a timestamped screenshot, 1..3 switch the camera
+                    // framing, LeftAlt toggles the cursor capture.
+                    cameraInput.handleWindowEvent(event);
+                    if (event.kind == window::WindowEventKind::KeyPressed)
                     {
-                        cursorDeltaX += event.cursorDeltaX;
-                        cursorDeltaY += event.cursorDeltaY;
-                    }
-                    else if (event.kind == window::WindowEventKind::KeyPressed)
-                    {
-                        // The in-app controls beyond camera movement: F12
-                        // saves a timestamped screenshot, 1..3 switch the
-                        // camera framing.
                         if (event.key == window::Key::F12)
                         {
                             screenshotQueued = true;
                         }
                         else if (event.key == window::Key::Num1)
                         {
-                            activeView = "field";
+                            activeView      = "field";
+                            applyViewPose   = true;
                         }
                         else if (event.key == window::Key::Num2)
                         {
-                            activeView = "showcase";
+                            activeView      = "showcase";
+                            applyViewPose   = true;
                         }
                         else if (event.key == window::Key::Num3)
                         {
-                            activeView = "pool";
+                            activeView      = "pool";
+                            applyViewPose   = true;
                         }
                     }
                 });
-            harness::clampCursorDelta(cursorDeltaX, cursorDeltaY, 128.0);
 
             if (windowCapability.isKeyDown != nullptr
                 && windowCapability.isKeyDown(windowCapability.self, windowHandle, window::Key::Escape))
@@ -407,10 +444,21 @@ int main()
                 }
                 else if (activeView == "pool")
                 {
-                    eye   = glm::vec3(static_cast<float>(focus.x) + 4.5f, 1.9f, static_cast<float>(focus.z) + 8.0f);
-                    target = glm::vec3(static_cast<float>(focus.x) - 3.5f, 0.3f, static_cast<float>(focus.z) - 3.5f);
-                    sweepRadians = 0.10;
-                    sweepRadius  = 1.2;
+                    // The classic pool photograph: a LOW three-quarter pose
+                    // along the pool's long axis, on the sun side. The
+                    // Fresnel curve does the composition - the near water
+                    // sits at a steep enough incidence to transmit (the pale
+                    // floor reads through), the far water approaches grazing
+                    // and turns to a dusk-sky mirror carrying the far coping's
+                    // dark rim and the glowing shapes' reflections, and the
+                    // transition rides the length of the pool instead of a
+                    // flat sheet (a fully raised pose flattens both terms:
+                    // the transmission reads as a uniform tint and the
+                    // reflections fall below the sheet's own brightness).
+                    eye   = glm::vec3(static_cast<float>(focus.x) + 0.8f, 2.2f, static_cast<float>(focus.z) + 9.6f);
+                    target = glm::vec3(static_cast<float>(focus.x) - 1.2f, 0.3f, static_cast<float>(focus.z) - 3.5f);
+                    sweepRadians = 0.04;
+                    sweepRadius  = 0.8;
                 }
                 else
                 {
@@ -433,42 +481,40 @@ int main()
             }
             else
             {
-                // Full manual flight: WASD walks the plane, Space/Ctrl
-                // ride the height axis, Shift sprints (the same movement
-                // set the planet demo's ground views carry).
-                camera::CameraInputState input{};
-                const auto keyDown = [&windowCapability, &windowHandle](window::Key key)
+                // Full manual flight: the shared input sample carries the
+                // WASD/Space/Ctrl axes plus the raw cursor deltas (the camera
+                // module's degrees-per-pixel look path), Shift sprints. A
+                // 1..3 key press re-frames the camera first through the
+                // view's own pose, then manual flight continues from there.
+                if (applyViewPose)
                 {
-                    return windowCapability.isKeyDown(
-                    windowCapability.self, windowHandle, key);
-                };
-                if (keyDown(window::Key::W))
-                {
-                    input.moveForward += 1.0f;
+                    applyViewPose = false;
+                    const glm::dvec3 focus = scene->showcaseFocus();
+                    glm::vec3       eye;
+                    glm::vec3       target;
+                    if (activeView == "showcase")
+                    {
+                        eye    = glm::vec3(static_cast<float>(focus.x) + 11.0f, 4.6f, static_cast<float>(focus.z) + 15.0f);
+                        target = glm::vec3(static_cast<float>(focus.x), 0.8f, static_cast<float>(focus.z));
+                    }
+                    else if (activeView == "pool")
+                    {
+                        eye    = glm::vec3(static_cast<float>(focus.x) + 0.8f, 2.2f, static_cast<float>(focus.z) + 9.6f);
+                        target = glm::vec3(
+                            static_cast<float>(focus.x) - 1.2f, 0.3f, static_cast<float>(focus.z) - 3.5f);
+                    }
+                    else
+                    {
+                        // The field framing's own orbit pose at time zero
+                        // (angle 0.55, radius 46 - the automated path's
+                        // opening frame).
+                        eye    = glm::vec3(39.2f, 15.0f, 24.0f);
+                        target = glm::vec3(0.0f, 2.5f, 0.0f);
+                    }
+                    cameraCapability.setLookAt(cameraCapability.self, cameraHandle, glm::value_ptr(eye),
+                        glm::value_ptr(target), glm::value_ptr(glm::vec3(0.0f, 1.0f, 0.0f)));
                 }
-                if (keyDown(window::Key::S))
-                {
-                    input.moveForward -= 1.0f;
-                }
-                if (keyDown(window::Key::D))
-                {
-                    input.moveRight += 1.0f;
-                }
-                if (keyDown(window::Key::A))
-                {
-                    input.moveRight -= 1.0f;
-                }
-                if (keyDown(window::Key::Space))
-                {
-                    input.moveUp += 1.0f;
-                }
-                if (keyDown(window::Key::LeftControl))
-                {
-                    input.moveUp -= 1.0f;
-                }
-                input.lookHorizontal = static_cast<float>(cursorDeltaX);
-                input.lookVertical   = static_cast<float>(cursorDeltaY);
-                input.sprint         = keyDown(window::Key::LeftShift);
+                const camera::CameraInputState input = cameraInput.sample();
                 cameraCapability.update(cameraCapability.self, cameraHandle, &input, deltaSeconds);
             }
 
@@ -559,6 +605,7 @@ int main()
             }
 
             const std::uint32_t renderedFrame = static_cast<std::uint32_t>(framesRendered - options.warmupFrames);
+            ++fpsWindowFrames;
             if (options.statsEveryFrames != 0 && renderedFrame > 0 && renderedFrame % options.statsEveryFrames == 0)
             {
                 radiance_cache::GiStatistics giStatistics;
@@ -566,14 +613,28 @@ int main()
                 const bool giValid         = giCapability.statistics(giCapability.self, &giStatistics);
                 const bool reflectionValid = reflectionCapability.statistics(reflectionCapability.self,
                     &reflectionStatistics);
-                std::cout << "demo_lighting: frame " << renderedFrame;
+                // The wall-clock frame rate over the stats window: with the
+                // frame limiter active this reads the configured limit
+                // (engine.max_fps, 60 by default) whenever the frame cost
+                // stays under one frame interval.
+                const auto   now        = std::chrono::steady_clock::now();
+                const double windowSeconds = std::chrono::duration<double>(now - fpsWindowStart).count();
+                const double framesPerSecond
+                    = windowSeconds > 0.0 ? static_cast<double>(fpsWindowFrames) / windowSeconds : 0.0;
+                fpsWindowStart  = now;
+                fpsWindowFrames = 0;
+                char fpsText[16];
+                std::snprintf(fpsText, sizeof(fpsText), "%.1f", framesPerSecond);
+                std::cout << "demo_lighting: frame " << renderedFrame << " | " << fpsText << " fps";
                 if (giValid)
                 {
                     std::cout << " | GI " << giStatistics.lastEvaluateMilliseconds << " ms (surfaces "
                               << giStatistics.surfaces << ", cards " << giStatistics.cards << ", skipped "
-                              << giStatistics.framesSkippedStatic << ", texels this frame "
-                              << (giStatistics.captureTexelsThisFrame + giStatistics.directTexelsThisFrame
-                                  + giStatistics.indirectTexelsThisFrame)
+                              << giStatistics.framesSkippedStatic << ", texels cap/dir/ind "
+                              << giStatistics.captureTexelsThisFrame << "/" << giStatistics.directTexelsThisFrame
+                              << "/" << giStatistics.indirectTexelsThisFrame << ", probe rays "
+                              << giStatistics.probeTracesThisFrame << ", gather rays "
+                              << giStatistics.gatherRaysThisFrame
                               << ")";
                 }
                 if (reflectionValid)

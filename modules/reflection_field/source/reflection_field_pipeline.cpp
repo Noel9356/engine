@@ -877,6 +877,13 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
     state.fieldResolve.assign(pixelCount, RfResolve::None);
     state.fieldValid.assign(pixelCount, 0u);
     state.fieldRayCount.assign(pixelCount, 0.0f);
+    state.fieldReused.assign(pixelCount, 0u);
+    // The interleave phase advances every frame, so a stride above 1 rotates
+    // WHICH texels trace: every texel gets its turn within `stride` frames
+    // while the temporal accumulation (the denoise pass's reuse path) holds
+    // the skipped ones at their reprojected history.
+    const std::uint32_t traceStride = std::clamp(state.traceStride, 1u, 8u);
+    const std::size_t tracePhase = state.tracePhase;
     if (state.screenColor.size() != pixelCount)
     {
         state.screenColor.resize(pixelCount);
@@ -941,6 +948,25 @@ void rfTraceReflections(RfPipelineState &state, TaskScheduler *scheduler)
                     if (roughness > state.settings.roughMaxTrace)
                     {
                         continue; // above Max Roughness To Trace: no specular term
+                    }
+                    // Governor interleave (update_budget_milliseconds): this
+                    // frame's turn belongs to another texel - mark the reuse
+                    // and skip the trace; the denoise pass's temporal path
+                    // carries the reprojected history instead. The phase
+                    // rotation guarantees every texel traces within `stride`
+                    // frames. DYNAMIC surfaces (the animated water, flagged
+                    // through the registry) are exempt: their content changes
+                    // with the surface, not the camera, so reprojected
+                    // history is a stale average of past wave phases - they
+                    // trace every frame and the stride paces the static field
+                    // alone.
+                    const bool texelDynamic = state.gbufferSurface[index] != noSurface
+                        && static_cast<std::size_t>(state.gbufferSurface[index]) < state.surfaces.size()
+                        && state.surfaces[state.gbufferSurface[index]].dynamic;
+                    if (traceStride > 1 && ((index + tracePhase) % traceStride) != 0 && !texelDynamic)
+                    {
+                        state.fieldReused[index] = 1u;
+                        continue;
                     }
                     const glm::vec3 position = state.gbufferPosition[index];
                     const glm::vec3 normal   = state.gbufferNormal[index];

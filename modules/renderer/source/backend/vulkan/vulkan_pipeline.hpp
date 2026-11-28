@@ -77,10 +77,11 @@ public:
         pipelineCacheMaxBytes_ = maximumBytes;
     }
 
-    // Creates render pass, descriptor layouts (set 0: frame uniform buffer;
-    // set 1: five combined image samplers), pipeline layout, mesh pipeline,
-    // fur pipeline, and overlay pipeline. srgbOutput_ and sampleCount_ must
-    // be set first.
+    // Creates render pass, descriptor layouts (set 0: frame uniform buffer +
+    // probe storage buffer + reflection-field sampler; set 1: five combined
+    // image samplers), pipeline layout, the mesh pipeline family, fur
+    // pipeline, and overlay pipeline. srgbOutput_ and sampleCount_ must be
+    // set first.
     bool build(const VulkanDeviceContext &device, VkFormat colorFormat, VkFormat depthFormat);
 
     // Serializes the pipeline cache to its disk path immediately. The normal
@@ -114,6 +115,10 @@ public:
     {
         return materialSetLayout_;
     }
+    VkDescriptorSetLayout materialExtensionSetLayout() const
+    {
+        return materialExtensionSetLayout_;
+    }
     VkPipelineLayout pipelineLayout() const
     {
         return pipelineLayout_;
@@ -122,41 +127,20 @@ public:
     {
         return pipeline_;
     }
-    // Mesh-pipeline twin with depth writes disabled (depth testing stays
-    // on): the variant mesh draws bind when the material's depthWrite flag
-    // is off (atmosphere/sky backdrop shells drawn ahead of the opaque
-    // scene).
-    VkPipeline pipelineNoDepthWrite() const
-    {
-        return pipelineNoDepthWrite_;
-    }
-    // Two-sided mesh pipeline variants (cull mode NONE): the variants bind
-    // when the material's doubleSided flag is on (cloth sheets, flags, thin
-    // shells), whose fragments may face either way and flip their shading
-    // normal in the fragment stage. Same shaders and layout as the
-    // front-face-culled mesh pipeline; each has its depth-write twin.
-    VkPipeline pipelineTwoSided() const
-    {
-        return pipelineTwoSided_;
-    }
-    VkPipeline pipelineTwoSidedNoDepthWrite() const
-    {
-        return pipelineTwoSidedNoDepthWrite_;
-    }
-    // Transparent mesh pipeline variants (src-alpha / one-minus-src-alpha
-    // blending, depth TEST on, depth WRITE off - the transparent pass the
-    // material's opacity contract documents; mesh.frag already outputs
-    // opacity * texel alpha in oColor.a for exactly this blend). Selected
-    // when the material's opacity is below 1; each has its two-sided twin
-    // for double-sided transparent surfaces (cloth sheets, glass panes).
-    VkPipeline pipelineTransparent() const
-    {
-        return pipelineTransparent_;
-    }
-    VkPipeline pipelineTransparentTwoSided() const
-    {
-        return pipelineTransparentTwoSided_;
-    }
+    // The mesh pipeline family has three independent axes:
+    //   depthWrite - off for backdrop shells and (always) transparent draws,
+    //     so a blended surface never poisons the depth buffer;
+    //   twoSided - cull mode NONE for double-sided materials (cloth sheets,
+    //     flags, thin shells), whose fragments may face either way and flip
+    //     their shading normal in the fragment stage;
+    //   cwWinding - VK_FRONT_FACE_CLOCKWISE for materials declaring the
+    //     mirrored winding convention (MeshMaterial::frontFaceWinding < 0);
+    //   transparent - alpha blending (src-alpha / one-minus-src-alpha) for
+    //     materials with opacity below 1, the mesh.frag oColor.a twin of the
+    //     software rasterizer's transparent commit.
+    // The opaque family crosses depthWrite x twoSided x cwWinding; the
+    // transparent family fixes depthWrite off, leaving twoSided x cwWinding.
+    VkPipeline meshPipeline(bool depthWrite, bool twoSided, bool cwWinding, bool transparent) const;
     VkPipelineLayout overlayPipelineLayout() const
     {
         return overlayPipelineLayout_;
@@ -209,15 +193,24 @@ private:
 
     VkRenderPass          renderPass_            = VK_NULL_HANDLE;
     VkRenderPass          renderPassResume_      = VK_NULL_HANDLE; // LOAD-op twin (mid-frame transfer resume)
-    VkDescriptorSetLayout frameSetLayout_        = VK_NULL_HANDLE; // set 0: one uniform buffer (FrameData)
-    VkDescriptorSetLayout materialSetLayout_     = VK_NULL_HANDLE; // set 1: five combined image samplers
+    VkDescriptorSetLayout frameSetLayout_        = VK_NULL_HANDLE; // set 0: uniform buffer + probe storage + field sampler
+    VkDescriptorSetLayout materialSetLayout_     = VK_NULL_HANDLE; // set 1: six combined image samplers
+    VkDescriptorSetLayout materialExtensionSetLayout_ = VK_NULL_HANDLE; // set 2 (mesh): dynamic-offset material extension UBO
     VkPipelineLayout      pipelineLayout_        = VK_NULL_HANDLE;
     VkPipeline            pipeline_              = VK_NULL_HANDLE;
     VkPipeline            pipelineNoDepthWrite_  = VK_NULL_HANDLE;
     VkPipeline            pipelineTwoSided_      = VK_NULL_HANDLE;
     VkPipeline            pipelineTwoSidedNoDepthWrite_ = VK_NULL_HANDLE;
+    // Declared-winding (CW front face) and transparent (alpha-blended)
+    // mesh variants; see meshPipeline().
+    VkPipeline            pipelineCwWinding_     = VK_NULL_HANDLE;
+    VkPipeline            pipelineCwWindingNoDepthWrite_ = VK_NULL_HANDLE;
+    VkPipeline            pipelineTwoSidedCwWinding_     = VK_NULL_HANDLE;
+    VkPipeline            pipelineTwoSidedCwWindingNoDepthWrite_ = VK_NULL_HANDLE;
     VkPipeline            pipelineTransparent_   = VK_NULL_HANDLE;
-    VkPipeline            pipelineTransparentTwoSided_ = VK_NULL_HANDLE;
+    VkPipeline            pipelineTwoSidedTransparent_   = VK_NULL_HANDLE;
+    VkPipeline            pipelineTransparentCwWinding_  = VK_NULL_HANDLE;
+    VkPipeline            pipelineTwoSidedTransparentCwWinding_ = VK_NULL_HANDLE;
     VkPipelineLayout      furPipelineLayout_     = VK_NULL_HANDLE; // set layouts + 128-byte push constants
     VkPipeline            furPipeline_           = VK_NULL_HANDLE;
     VkPipelineLayout      overlayPipelineLayout_ = VK_NULL_HANDLE; // set 1 layout + 16-byte vertex push constants

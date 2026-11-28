@@ -11,3 +11,11 @@ The archive preserves the original path `engine/demos/planet/assets/`.
 Extract the package before configuring CMake. If the project has already been
 configured, re-run CMake configuration after extraction so the application
 runtime staging step detects and copies the assets.
+
+## Texture formats
+
+The terrain and vegetation textures ship as KTX 2 files (`.ktx2`, Basis
+UASTC with zstd supercompression and a full mip chain). The renderer loads
+them through its KTX path; machines whose GPU samples BC formats natively
+transcode to BC7 at load, and every other machine decodes on the CPU - no
+separate asset variant is needed.

@@ -111,12 +111,6 @@ bool exportScreenshot(engine::ParticipantContext &context, engine::window::Windo
     return exported;
 }
 
-void clampCursorDelta(double &deltaX, double &deltaY, double maximumCursorDeltaPixels)
-{
-    deltaX = std::clamp(deltaX, -maximumCursorDeltaPixels, maximumCursorDeltaPixels);
-    deltaY = std::clamp(deltaY, -maximumCursorDeltaPixels, maximumCursorDeltaPixels);
-}
-
 void FrameTimingRecorder::setAutoFlushPath(const std::string &path)
 {
     autoFlushPath_ = path;

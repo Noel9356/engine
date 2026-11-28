@@ -615,6 +615,12 @@ public:
     bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error) override;
     void destroyTexture(TextureHandle texture) override;
 
+    // Block textures (the KTX path): bcdec software-decodes every level
+    // into the same RGBA8 + float-RGB mip-chain layout createTexture builds,
+    // so all supported formats are accepted regardless of GPU support.
+    bool createBlockTexture(TextureHandle id, const BlockTextureDescription &description, RenderError *error) override;
+    [[nodiscard]] BlockTextureFormatSupport blockFormatSupport() const override;
+
     FrameStatistics statistics() const override
     {
         return statistics_;
@@ -794,12 +800,23 @@ private:
         glm::vec3              fogColor                = glm::vec3(0.0f);
         float                  fogScaleMeters          = 1000.0f;
         float                  fogAsymptote            = 0.0f;
+        // Near-field relief overlay (MeshMaterial's detail triple): the
+        // finer-tiling normal map plus its fade band. The overlay perturbs
+        // the tangent-space normal before the TBN transform; the fade rides
+        // the sample's camera distance, so the grain appears as the eye
+        // descends (see shadeTrianglePixel's twin block).
+        const HeadlessTexture *detailNormalMap         = nullptr;
+        float                  detailUvScale           = 0.0f;
+        float                  detailFadeStartMeters   = 2.0f;
+        float                  detailFadeEndMeters     = 40.0f;
+        float                  detailStrength          = 1.0f;
         bool                   hasBaseColorMap         = false;
         bool                   hasNormalMap            = false;
         bool                   hasMetallicRoughnessMap = false;
         bool                   hasEmissiveMap          = false;
         bool                   hasEmissive             = false;
         bool                   hasOcclusion            = false;
+        bool                   hasDetailNormal         = false;
         glm::vec3              fallbackTangentNormal   = glm::vec3(0.0f, 0.0f, 1.0f);
 
         bool  enableBackFaceCull = false;
@@ -883,7 +900,7 @@ private:
     // per-pixel probe-grid walk with a caller-evaluated quad sample.
     ENGINE_RASTERIZER_INLINE glm::vec3 shadeTrianglePixel(const RasterSetup &setup, const TileBinRecord &record,
         float weightA, float weightB, float inverseWA, float inverseWB, float inverseWC,
-        bool *outFieldTraced = nullptr, const GiAmbientSample *giSample = nullptr,
+        bool *outFieldTraced = nullptr, float *outFieldCoverage = nullptr, const GiAmbientSample *giSample = nullptr,
         const glm::vec3 *interpolatedPair = nullptr, const glm::vec3 *geometryNormalPair = nullptr) const;
 
     // The GI ambient walk the tile cache and the per-pixel path amortize:
@@ -921,7 +938,7 @@ private:
         {
             return 1.0f;
         }
-        return sunshadows::sunShadowVisibility(skyShadowMap_, worldPosition, normal, shadowFilterRadiusTexels_);
+        return sunshadows::skyShadowVisibilityFiltered(skyShadowMap_, worldPosition, normal, shadowFilterRadiusTexels_);
     }
 
     // Camera response presentation pass (see endFrame): the pivot-point

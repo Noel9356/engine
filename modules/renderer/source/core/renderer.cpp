@@ -34,6 +34,7 @@
 #include "render_backend.hpp"
 #include "render_data.hpp"
 #include "render_errors.hpp"
+#include "ktx_texture_loader.hpp"
 #include "render_shared.hpp"
 #include "renderer_settings.hpp"
 
@@ -318,7 +319,14 @@ private:
 #endif
         }
 
-        if (surfaceApi == window::SurfaceApi::Vulkan)
+        // A Vulkan-API surface is not automatically unusable for the headless
+        // rasterizer: a headless window in a HEADLESS_VULKAN build reports
+        // Vulkan while still carrying the software RGBA surface the CPU
+        // rasterizer blits into. Only a surface whose window runs on a real
+        // backend (GLFW-driven Vulkan) is rejected here - the headless
+        // rasterizer cannot drive that present path.
+        if (surfaceApi == window::SurfaceApi::Vulkan
+            && window_->activeBackendName(window_->self) != std::string("headless"))
         {
             reportError(error, RenderError::BackendUnavailable);
             return invalidRenderer;
@@ -749,6 +757,10 @@ private:
             reportError(error, RenderError::InvalidTexture);
             return invalidTexture;
         }
+        if (isKtxFile(filePath))
+        {
+            return createKtxTextureFromFile(renderer, filePath, error);
+        }
         int width          = 0;
         int height         = 0;
         int channelsInFile = 0;
@@ -757,6 +769,23 @@ private:
         if (pixels == nullptr)
         {
             std::fprintf(stderr, "renderer module: could not decode texture '%s': %s\n", filePath, stbi_failure_reason());
+            reportError(error, RenderError::InvalidTexture);
+            return invalidTexture;
+        }
+        // Dimension cap: stb_image allocates w*h*4 bytes from the file's
+        // own headers, so a crafted image declaring huge extents is a
+        // decompression-bomb vector; the KTX path caps its loads the same
+        // way (maximumKtxTextureSize).
+        if (width <= 0 || height <= 0 || static_cast<std::uint32_t>(width) > maximumKtxTextureSize
+            || static_cast<std::uint32_t>(height) > maximumKtxTextureSize)
+        {
+            std::fprintf(stderr,
+                "renderer module: texture '%s' is %dx%d; dimensions above %u are rejected\n",
+                filePath,
+                width,
+                height,
+                (unsigned)maximumKtxTextureSize);
+            stbi_image_free(pixels);
             reportError(error, RenderError::InvalidTexture);
             return invalidTexture;
         }
@@ -769,6 +798,78 @@ private:
         };
         const TextureHandle textureId = createTextureImpl(renderer, &description, error);
         stbi_image_free(pixels);
+        return textureId;
+    }
+
+    // KTX branch of createTextureFromFile: loads the container (libktx),
+    // picks the best payload the backend samples natively, and hands the
+    // result to the backend. Block payloads keep the GPU-native format
+    // (four-to-eight-fold less device memory than the RGBA expansion);
+    // RGBA payloads flow through the regular createTexture path, so the
+    // two loaders produce identical images for the same file.
+    TextureHandle createKtxTextureFromFile(RendererHandle renderer, const char *filePath, RenderError *error)
+    {
+        RendererRecord *record = recordFor(renderer);
+        if (record == nullptr || record->backendInstance == nullptr)
+        {
+            reportError(error, RenderError::InvalidHandle);
+            return invalidTexture;
+        }
+        if (filePath == nullptr)
+        {
+            reportError(error, RenderError::InvalidTexture);
+            return invalidTexture;
+        }
+
+        KtxLoadedTexture loaded;
+        std::string      failureReason;
+        if (!loadKtxTexture(filePath,
+                record->backendInstance->blockFormatSupport(),
+                TextureFilter::Linear,
+                TextureAddress::Repeat,
+                loaded,
+                error,
+                failureReason))
+        {
+            std::fprintf(stderr,
+                "renderer module: could not load KTX texture '%s': %s\n",
+                filePath,
+                failureReason.empty() ? "unsupported file" : failureReason.c_str());
+            return invalidTexture;
+        }
+
+        if (nextTextureId_ == invalidTexture)
+        {
+            reportError(error, RenderError::CreationFailed);
+            return invalidTexture;
+        }
+        const TextureHandle textureId = nextTextureId_++;
+        if (loaded.storage == KtxLoadedTexture::Storage::Blocks)
+        {
+            const BlockTextureDescription blockDescription{
+                .width      = loaded.width,
+                .height     = loaded.height,
+                .levelCount = loaded.levelCount,
+                .format     = loaded.format,
+                .pixels     = loaded.blocks.data(),
+                .levelBytes = loaded.levelBytes.data(),
+                .filter     = TextureFilter::Linear,
+                .address    = TextureAddress::Repeat,
+            };
+            if (!record->backendInstance->createBlockTexture(textureId, blockDescription, error))
+            {
+                return invalidTexture;
+            }
+        }
+        else
+        {
+            if (!record->backendInstance->createTexture(textureId, loaded.description, error))
+            {
+                return invalidTexture;
+            }
+        }
+        record->textureMeans[textureId] = loaded.mean;
+        reportError(error, RenderError::None);
         return textureId;
     }
 

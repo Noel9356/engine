@@ -15,6 +15,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -60,11 +61,6 @@ std::uint32_t drainWindowEvents(engine::window::WindowCapability &windowCapabili
 bool exportScreenshot(engine::ParticipantContext &context, engine::window::WindowCapability &windowCapability,
     engine::window::WindowHandle windowHandle, engine::renderer::RenderCapability &renderCapability,
     engine::renderer::RendererHandle rendererHandle, const std::string &requestedPath, std::string &writtenPath);
-
-// Clamps a cursor delta to the +/-maximumCursorDeltaPixels band the demos
-// use: a window-system glitch (or a warp across screens) must not throw the
-// camera to the horizon in one frame. Applied symmetrically to x and y.
-void clampCursorDelta(double &deltaX, double &deltaY, double maximumCursorDeltaPixels);
 
 // Per-frame timing capture: records how long each rendered frame spends in
 // its update, upload, and draw phases, then reports percentile statistics and
@@ -120,5 +116,87 @@ private:
     FrameTimingSample current_{};
     std::string autoFlushPath_;
 };
+
+// Resolves the effective software frame-rate cap for a demo's frame pacer
+// from the engine.max_fps contract:
+//
+//   max_fps > 0  - the loop never runs faster than max_fps. The software
+//                  pacer enforces this on its own; a blocking present mode
+//                  (FIFO/vsync) is only trusted to stand down the pacer when
+//                  the display itself already caps the loop at or below
+//                  max_fps (presentedPacing && refresh <= max_fps), because
+//                  vsync alone cannot run slower than the display.
+//   max_fps == 0 - the loop never runs faster than the display. A blocking
+//                  present mode already does exactly that; otherwise the
+//                  pacer takes the monitor's refresh rate as its target
+//                  (0/unknown leaves the loop uncapped).
+//   headless     - never paced: capture and benchmark runs measure raw cost.
+//
+// The monitor rate comes from the window attributes (refresh of the monitor
+// the window sits on); pass 0 when the demo did not query one.
+inline double resolveFramePaceTargetHz(bool windowed, std::int64_t maxFps, bool presentedPacing,
+    double monitorRefreshHz)
+{
+    if (!windowed)
+    {
+        return 0.0;
+    }
+    if (maxFps > 0)
+    {
+        if (presentedPacing && monitorRefreshHz > 0.0 && monitorRefreshHz <= static_cast<double>(maxFps))
+        {
+            return 0.0; // the display's own cap is at least as strict as max_fps
+        }
+        return static_cast<double>(maxFps);
+    }
+    if (presentedPacing)
+    {
+        return 0.0; // vsync paces the loop at the display rate already
+    }
+    return monitorRefreshHz > 0.0 ? monitorRefreshHz : 0.0;
+}
+
+// Installs the resolved target into a FramePacer and prints the one-line
+// explanation a windowed run owes the console; returns the effective target
+// (0 = uncapped). Defined here so both demos narrate the limit identically.
+template <typename FramePacer>
+double applyFramePaceTarget(FramePacer &pacer, bool windowed, std::int64_t maxFps, bool presentedPacing,
+    double monitorRefreshHz, const char *demoPrefix)
+{
+    const double targetHz = resolveFramePaceTargetHz(windowed, maxFps, presentedPacing, monitorRefreshHz);
+    pacer.setOptions({.targetFrameRateHz = targetHz, .spinWindowMicroseconds = targetHz > 0.0 ? 200u : 0u});
+    if (!windowed)
+    {
+        return targetHz;
+    }
+    if (maxFps > 0)
+    {
+        if (targetHz <= 0.0)
+        {
+            std::printf("%s: max_fps %lld left to the display - vsync already paces the frame loop at %s\n",
+                demoPrefix, static_cast<long long>(maxFps),
+                monitorRefreshHz > 0.0 ? "its rate or below" : "or below its rate");
+        }
+        else
+        {
+            std::printf("%s: frame limit %lld fps (engine.max_fps)\n", demoPrefix, static_cast<long long>(maxFps));
+        }
+    }
+    else if (targetHz > 0.0)
+    {
+        std::printf("%s: frame limit %.0f fps (engine.max_fps 0 - the display's refresh rate)\n",
+            demoPrefix, targetHz);
+    }
+    else if (!presentedPacing)
+    {
+        std::printf("%s: frame limit uncapped (engine.max_fps 0, display rate unknown, no vsync)\n", demoPrefix);
+    }
+    else
+    {
+        std::printf("%s: frame limit left to vsync (engine.max_fps 0 - presentation paces the frame loop)\n",
+            demoPrefix);
+    }
+    return targetHz;
+}
 
 } // namespace demo::harness

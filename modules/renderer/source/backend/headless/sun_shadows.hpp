@@ -53,6 +53,11 @@ struct SunShadowCaster
     std::uint32_t mesh     = 0;
     float         transform[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
                 0.0f, 0.0f, 1.0f};
+    // Alpha-cutout casting: the draw's cutoff and base-color texture handle
+    // (invalidTexture for solid geometry). Resolved against the texture
+    // table at geometry-build time, exactly like the mesh handle.
+    float         alphaCutoff = 0.0f;
+    std::uint32_t alphaTexture = 0;
 };
 
 // Geometry + placement one caster resolves to at build time. The caller
@@ -69,6 +74,18 @@ struct SunShadowGeometry
     const float         *transformColumnMajor = nullptr;
     glm::vec3            worldBoundsMin{0.0f};
     glm::vec3            worldBoundsMax{0.0f};
+    // Alpha-cutout casting (alpha-tested vegetation cards): when alphaCutoff
+    // is positive, uvs (tightly packed uv pairs, positionCount * 2) and the
+    // RGBA8 alphaTexels describe the card's cutout mask, and a texel whose
+    // nearest-sample alpha falls below the cutoff does not enter the depth
+    // map - the card casts its SPRITE silhouette instead of the full quad
+    // (a solid quad shadow is a rotating slab under every billboard stand,
+    // and a rotating shadow is the one thing a light cannot produce).
+    const float         *uvs              = nullptr;
+    const std::uint8_t *alphaTexels       = nullptr;
+    std::uint32_t        alphaWidth       = 0;
+    std::uint32_t        alphaHeight      = 0;
+    float                alphaCutoff      = 0.0f;
 };
 
 // The built shadow map: an orthographic depth buffer looking from the scene
@@ -299,6 +316,12 @@ inline void sunShadowRasterCasters(SunShadowMap &map, const std::vector<SunShado
         const glm::mat4 model = glm::make_mat4(caster.transformColumnMajor);
 
         const std::size_t triangleCount = caster.indexCount / 3;
+        // Cutout state hoisted per caster: three uv pairs per triangle are
+        // interpolated with the same barycentric weights the depth uses.
+        const bool  cutout = caster.alphaCutoff > 0.0f && caster.alphaTexels != nullptr && caster.uvs != nullptr;
+        const float cutoff = caster.alphaCutoff;
+        const std::uint32_t alphaW = caster.alphaWidth;
+        const std::uint32_t alphaH = caster.alphaHeight;
         for (std::size_t triangle = 0; triangle < triangleCount; ++triangle)
         {
             glm::vec3 world[3];
@@ -342,6 +365,27 @@ inline void sunShadowRasterCasters(SunShadowMap &map, const std::vector<SunShado
             if (!inside)
             {
                 continue;
+            }
+
+            // Per-triangle cutout uvs (the same vertices the depth walk
+            // uses; degenerate index guard mirrors the position read).
+            glm::vec2 triUv[3] = {glm::vec2(0.0f), glm::vec2(0.0f), glm::vec2(0.0f)};
+            if (cutout)
+            {
+                for (std::uint32_t corner = 0; corner < 3; ++corner)
+                {
+                    const std::uint32_t vertexIndex = caster.indices[triangle * 3 + corner];
+                    if (vertexIndex >= caster.positionCount)
+                    {
+                        triUv[0] = glm::vec2(-1.0f); // sentinel: drop the triangle
+                        break;
+                    }
+                    triUv[corner] = glm::vec2(caster.uvs[vertexIndex * 2], caster.uvs[vertexIndex * 2 + 1]);
+                }
+                if (triUv[0].x < -0.5f)
+                {
+                    continue;
+                }
             }
 
             // Edge-function scan over the triangle's map-space bounding box;
@@ -398,6 +442,24 @@ inline void sunShadowRasterCasters(SunShadowMap &map, const std::vector<SunShado
                     if (w0 < -0.001f || w1 < -0.001f || w2 < -0.001f)
                     {
                         continue;
+                    }
+                    // Alpha cutout: the interpolated uv's nearest texel below
+                    // the cutoff is a hole in the sprite - no depth store.
+                    // Nearest (not bilinear) matches the color path's cutout
+                    // semantics: a hard mask, stable under map resolution.
+                    if (cutout)
+                    {
+                        const glm::vec2 uv = triUv[0] * w0 + triUv[1] * w1 + triUv[2] * w2;
+                        const std::int32_t texelX = static_cast<std::int32_t>(uv.x * static_cast<float>(alphaW));
+                        const std::int32_t texelY = static_cast<std::int32_t>(uv.y * static_cast<float>(alphaH));
+                        const std::uint32_t wrappedX = static_cast<std::uint32_t>(texelX & static_cast<std::int32_t>(alphaW - 1u));
+                        const std::uint32_t wrappedY = static_cast<std::uint32_t>(texelY & static_cast<std::int32_t>(alphaH - 1u));
+                        const std::uint8_t alpha
+                            = caster.alphaTexels[(static_cast<std::size_t>(wrappedY) * alphaW + wrappedX) * 4u + 3u];
+                        if (static_cast<float>(alpha) * (1.0f / 255.0f) < cutoff)
+                        {
+                            continue;
+                        }
                     }
                     const float depth = w0 * unit[0].z + w1 * unit[1].z + w2 * unit[2].z;
                     float &cell = depthRow[static_cast<std::uint32_t>(column)];
@@ -485,10 +547,6 @@ inline float sunShadowVisibility(const SunShadowMap &map, const glm::vec3 &world
     const float bias       = (2.0f + 3.0f * slope) * map.texelWorldSize / map.depthExtent;
     const float refDepth   = depth - bias;
     const float mapSize    = static_cast<float>(map.resolution);
-    const float radius     = std::max(filterRadiusTexels, 0.0f);
-    // Soft-compare ramp width: roughly one and a half texels' worth of depth
-    // (the scale the stored depths quantize at), so penumbra edges shade
-    // smoothly instead of stepping.
     const float compareRamp = 1.5f * map.texelWorldSize / map.depthExtent;
     const float invRamp     = compareRamp > 1.0e-9f ? 1.0f / compareRamp : 0.0f;
 
@@ -506,21 +564,209 @@ inline float sunShadowVisibility(const SunShadowMap &map, const glm::vec3 &world
         // Soft depth compare: instead of the hard lit/blocked step (whose
         // quantization the 4-tap average cannot hide), the comparison ramps
         // over roughly one texel's worth of depth, so penumbra edges shade
-        // smoothly and the box taps blend spatially.
+        // smoothly and the disk taps blend spatially.
+        return glm::clamp((stored - refDepth) * invRamp + 0.5f, 0.0f, 1.0f);
+    };
+    // Raw stored depth at a tap (for the blocker search): taps outside the
+    // map count as unoccluded sky (1.0 = empty).
+    const auto tapDepth = [&](float tapX, float tapY)
+    {
+        const std::int32_t column = static_cast<std::int32_t>(tapX);
+        const std::int32_t row    = static_cast<std::int32_t>(tapY);
+        if (column < 0 || row < 0 || column >= static_cast<std::int32_t>(map.resolution)
+            || row >= static_cast<std::int32_t>(map.resolution))
+        {
+            return 1.0f;
+        }
+        return map.depth[static_cast<std::size_t>(row) * map.resolution
+            + static_cast<std::uint32_t>(column)];
+    };
+
+    const float sampleU = u * mapSize - 0.5f;
+    const float sampleV = v * mapSize - 0.5f;
+    if (filterRadiusTexels < 0.25f)
+    {
+        return tapLit(sampleU, sampleV);
+    }
+
+    // Rotated Poisson-disk percentage-closer filter with blocker search
+    // (the software PCSS recipe). The sun is an extended source, so a
+    // receiver's penumbra widens with its distance from the occluder: the
+    // blocker pass averages the depth of the nearest occluders in the
+    // filter's footprint (taps in shadow only), and the search radius grows
+    // with that distance before the filter pass runs. The contact side of a
+    // shadow stays crisp (the penumbra is a texel or two wide at the
+    // caster's base) while far receivers grade across a wide, smooth band -
+    // the look direct sun plus an area source photographs, and the one a
+    // single fixed-width filter cannot hold at both ranges. The disk
+    // rotation comes from a world-anchored interleaved-gradient gradient of
+    // the receiver position: every point filters through a differently
+    // oriented tap set, so the fixed pattern's concentric rings never line
+    // up along a shadow edge (the "offset copies" read a repeated ring
+    // layout gives), and because the hash is a pure function of the world
+    // position the pattern is stable frame to frame - no temporal shimmer.
+    static constexpr float kPoissonX[12] = {-0.326f, -0.406f, -0.794f, 0.212f, 0.713f, -0.078f,
+        0.484f, -0.156f, -0.601f, 0.970f, 0.532f, -0.473f};
+    static constexpr float kPoissonY[12] = {-0.588f, 0.234f, 0.187f, 0.740f, -0.366f, -0.646f,
+        0.344f, 0.916f, 0.425f, 0.006f, -0.711f, 0.047f};
+    static constexpr float kBlockerX[4] = {-0.408f, 0.408f, -0.245f, 0.573f};
+    static constexpr float kBlockerY[4] = {0.408f, -0.408f, 0.522f, -0.139f};
+
+    const float positionHash = std::fmod(
+        std::sin(worldPosition.x * 12.9898f + worldPosition.y * 78.233f + worldPosition.z * 37.719f) * 43758.5453f,
+        1.0f);
+    const float hash01 = positionHash - std::floor(positionHash);
+    const float angle  = hash01 * 6.2831853f;
+    const float cosA   = std::cos(angle);
+    const float sinA   = std::sin(angle);
+    // Second world-anchored hash (different mixing constants): drives the
+    // per-tap RADIUS jitter below. Rotation alone cannot decorrelate the
+    // disk's radial power spectrum - every receiver filters through the
+    // SAME twelve radii, so along a shadow edge the averaged taps leave a
+    // faint ring-banded penumbra at the tap-ring pitch (the residual
+    // vertical striping dark facades showed at the filter radius' spacing).
+    // Scaling each tap's offset by an independent 0.72..1.28 factor turns
+    // the fixed disk into a stochastic area sample: the banding becomes
+    // sub-visible noise while twelve taps still average to a smooth kernel
+    // (the jitter's variance rides the same 1/12 averaging the rotation
+    // already pays). Deterministic in the world position: a converged
+    // frame stays bit-stable, no temporal shimmer.
+    const float radiusHash = std::fmod(
+        std::sin(worldPosition.x * 93.989f + worldPosition.y * 67.345f + worldPosition.z * 11.135f) * 24634.6345f,
+        1.0f);
+    const float radiusHash01 = radiusHash - std::floor(radiusHash);
+
+    // Blocker search at the full filter radius: the average occluder depth
+    // nearest this receiver (stored depth < refDepth = nearer the light).
+    float blockerSum  = 0.0f;
+    float blockerHits = 0.0f;
+    for (std::uint32_t tap = 0; tap < 4; ++tap)
+    {
+        const float bx = sampleU + cosA * kBlockerX[tap] * filterRadiusTexels - sinA * kBlockerY[tap] * filterRadiusTexels;
+        const float by = sampleV + sinA * kBlockerX[tap] * filterRadiusTexels + cosA * kBlockerY[tap] * filterRadiusTexels;
+        const float stored = tapDepth(bx, by);
+        if (stored < refDepth)
+        {
+            blockerSum += stored;
+            blockerHits += 1.0f;
+        }
+    }
+    float radius = std::max(filterRadiusTexels, 0.0f);
+    if (blockerHits > 0.0f)
+    {
+        // Penumbra width from the occluder distance: the (ref - blocker)
+        // unit-space difference rescales into world meters through the
+        // map's depth extent, and the disk grows linearly with that
+        // distance (doubled at eight texels' worth of separation). Clamped
+        // to three times the configured radius so a distant blocker cannot
+        // wash the whole silhouette, and floored at one texel so contact
+        // edges keep their antialiasing.
+        const float blockerDepth  = blockerSum / blockerHits;
+        const float occluderMeters = (refDepth - blockerDepth) * map.depthExtent;
+        radius = glm::clamp(radius * (1.0f + occluderMeters / std::max(map.texelWorldSize * 8.0f, 1.0e-4f)),
+            1.0f, radius * 3.0f);
+    }
+
+    float sum = 0.0f;
+    const float tapPhase = radiusHash01;
+    for (std::uint32_t tap = 0; tap < 12; ++tap)
+    {
+        const float px = cosA * kPoissonX[tap] - sinA * kPoissonY[tap];
+        const float py = sinA * kPoissonX[tap] + cosA * kPoissonY[tap];
+        // Per-tap radius jitter: an independent 0.72..1.28 scale per tap from
+        // a cheap fract-hash chain (one multiply-add pair per tap - a sin
+        // here would cost more than the depth gather it steers; the golden-
+        // ratio stride decorrelates neighboring taps the way an irrational
+        // rotation does).
+        const float tapHash = tapPhase * 7.61f + static_cast<float>(tap) * 0.61803398875f;
+        const float tapJitter = 1.0f + 0.28f * (2.0f * (tapHash - std::floor(tapHash)) - 1.0f);
+        sum += tapLit(sampleU + px * radius * tapJitter, sampleV + py * radius * tapJitter);
+    }
+    return sum * (1.0f / 12.0f);
+}
+
+// Sky-visibility twin of sunShadowVisibility: the SAME map machinery (the
+// sky shadow map stores zenith-direction depths), but the filter is a
+// deliberately cheaper six-tap rotated disk with NO blocker search and a
+// fixed soft radius. The term it scales is the hemispheric ambient - a
+// smooth, broad signal whose penumbra width nobody reads - so the
+// percentage-closer variance six taps leave is invisible while the cost
+// stays under half the sun path's (the sun's own contact shadows are what
+// the eye scrutinizes; they keep the full twelve-tap blocker-aware filter).
+inline float skyShadowVisibilityFiltered(const SunShadowMap &map, const glm::vec3 &worldPosition,
+    const glm::vec3 &normal, float filterRadiusTexels)
+{
+    if (!map.valid || map.resolution < 8u)
+    {
+        return 1.0f;
+    }
+    const float nDotL = glm::dot(normal, map.sunDirection);
+    if (nDotL <= 0.0f)
+    {
+        return 1.0f;
+    }
+    const float offsetScale = 1.5f * map.texelWorldSize / std::max(nDotL, 0.35f);
+    const glm::vec3 offsetPosition = worldPosition + normal * offsetScale;
+
+    const glm::vec3 delta = offsetPosition - map.origin;
+    const float     u     = (glm::dot(delta, map.right) / map.halfWidth + 1.0f) * 0.5f;
+    const float     v     = (glm::dot(delta, map.up) / map.halfHeight + 1.0f) * 0.5f;
+    const float     depth = (glm::dot(delta, map.forward) - map.minDepth) / map.depthExtent;
+    if (u <= 0.0f || v <= 0.0f || u >= 1.0f || v >= 1.0f || depth <= 0.0f || depth >= 1.0f)
+    {
+        return 1.0f;
+    }
+
+    const float slope       = std::sqrt(std::max(0.0f, 1.0f - nDotL * nDotL));
+    const float bias        = (2.0f + 3.0f * slope) * map.texelWorldSize / map.depthExtent;
+    const float refDepth    = depth - bias;
+    const float mapSize     = static_cast<float>(map.resolution);
+    const float compareRamp = 1.5f * map.texelWorldSize / map.depthExtent;
+    const float invRamp     = compareRamp > 1.0e-9f ? 1.0f / compareRamp : 0.0f;
+
+    const auto tapLit = [&](float tapX, float tapY)
+    {
+        const std::int32_t column = static_cast<std::int32_t>(tapX);
+        const std::int32_t row    = static_cast<std::int32_t>(tapY);
+        if (column < 0 || row < 0 || column >= static_cast<std::int32_t>(map.resolution)
+            || row >= static_cast<std::int32_t>(map.resolution))
+        {
+            return 1.0f;
+        }
+        const float stored = map.depth[static_cast<std::size_t>(row) * map.resolution
+            + static_cast<std::uint32_t>(column)];
         return glm::clamp((stored - refDepth) * invRamp + 0.5f, 0.0f, 1.0f);
     };
 
-    if (radius < 0.25f)
-    {
-        return tapLit(u * mapSize - 0.5f, v * mapSize - 0.5f);
-    }
-    // 2x2 percentage-closer taps at the filter radius: the four box corners
-    // averaged (0, 0.25, 0.5, 0.75, 1 steps of penumbra).
     const float sampleU = u * mapSize - 0.5f;
     const float sampleV = v * mapSize - 0.5f;
-    const float sum = tapLit(sampleU - radius, sampleV - radius) + tapLit(sampleU + radius, sampleV - radius)
-        + tapLit(sampleU - radius, sampleV + radius) + tapLit(sampleU + radius, sampleV + radius);
-    return sum * 0.25f;
+    if (filterRadiusTexels < 0.25f)
+    {
+        return tapLit(sampleU, sampleV);
+    }
+
+    // Six-tap rotated hexagonal disk at one-and-a-half times the configured
+    // radius: the ambient's own scale, not a penumbra estimate, so the wider
+    // fixed footprint simply smooths harder than the sun path.
+    static constexpr float kHexX[6] = {1.0f, 0.5f, -0.5f, -1.0f, -0.5f, 0.5f};
+    static constexpr float kHexY[6] = {0.0f, 0.866f, 0.866f, 0.0f, -0.866f, -0.866f};
+    const float positionHash = std::fmod(
+        std::sin(worldPosition.x * 12.9898f + worldPosition.y * 78.233f + worldPosition.z * 37.719f) * 43758.5453f,
+        1.0f);
+    const float hash01 = positionHash - std::floor(positionHash);
+    const float angle  = hash01 * 6.2831853f;
+    const float cosA   = std::cos(angle);
+    const float sinA   = std::sin(angle);
+    const float radius = filterRadiusTexels * 1.5f;
+
+    float sum = 0.0f;
+    for (std::uint32_t tap = 0; tap < 6; ++tap)
+    {
+        const float px = cosA * kHexX[tap] - sinA * kHexY[tap];
+        const float py = sinA * kHexX[tap] + cosA * kHexY[tap];
+        sum += tapLit(sampleU + px * radius, sampleV + py * radius);
+    }
+    return sum * (1.0f / 6.0f);
 }
 
 } // namespace sunshadows

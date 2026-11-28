@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -46,6 +47,7 @@ using engine::renderer::VertexSemantic;
 
 // Canonical interleaved vertex: 11 floats (position 3, normal 3, color 3, uv 2).
 constexpr std::uint32_t kVertexStride   = 11 * sizeof(float);
+constexpr std::uint32_t kVertexFloats   = 11; // floats per canonical vertex (kVertexStride / sizeof(float))
 constexpr std::uint32_t kGroundSegments = 16;  // 16x16 quads per tile
 constexpr double       kGroundTileMeters  = 24.0;
 constexpr std::uint32_t kGroundTileRadius = 6; // 13x13 tiles cover the field
@@ -120,8 +122,8 @@ const std::array<MaterialSlot, 10> &materialPalette()
         {{0.34f, 0.44f, 0.30f}, 0.80f, 0.0f, {0.0f, 0.0f, 0.0f}, 0.0f},  // sage green
         {{0.30f, 0.36f, 0.46f}, 0.70f, 0.0f, {0.0f, 0.0f, 0.0f}, 0.0f},  // slate blue
         {{0.70f, 0.58f, 0.34f}, 0.78f, 0.0f, {0.0f, 0.0f, 0.0f}, 0.0f},  // ochre
-        {{0.86f, 0.86f, 0.88f}, 0.24f, 0.92f, {0.0f, 0.0f, 0.0f}, 0.0f}, // polished steel
-        {{0.72f, 0.66f, 0.55f}, 0.30f, 0.85f, {0.0f, 0.0f, 0.0f}, 0.0f}, // brushed bronze
+        {{0.86f, 0.86f, 0.88f}, 0.42f, 0.92f, {0.0f, 0.0f, 0.0f}, 0.0f}, // polished steel
+        {{0.72f, 0.66f, 0.55f}, 0.48f, 0.85f, {0.0f, 0.0f, 0.0f}, 0.0f}, // brushed bronze
         {{0.16f, 0.18f, 0.20f}, 0.55f, 0.0f, {0.0f, 0.0f, 0.0f}, 0.0f},  // charred dark
         {{1.00f, 0.62f, 0.24f}, 0.90f, 0.0f, {1.0f, 0.45f, 0.12f}, 5.5f},// ember emissive
         {{0.30f, 0.62f, 1.00f}, 0.90f, 0.0f, {0.35f, 0.65f, 1.0f}, 4.5f},// cool emissive
@@ -148,9 +150,10 @@ void buildBoxPrototype(ObjectPrototype &box)
     {
         glm::vec3 normal;
         glm::vec3 color;
-        glm::vec3 corners[4]; // quad, one consistent winding across the mesh
-                              // (the winding vote only needs the whole mesh to
-                              // agree; the vertex normals carry the shading)
+        glm::vec3 corners[4]; // quad, wound so cross(c1 - c0, c2 - c0)
+                              // points along the face normal (the outward
+                              // convention MeshMaterial::frontFaceWinding
+                              // declares; every backend culls the same faces)
     };
     const float kShade[6] = {0.96f, 0.90f, 1.0f, 0.86f, 0.93f, 0.80f};
     const glm::vec3 v[8] = {
@@ -158,12 +161,12 @@ void buildBoxPrototype(ObjectPrototype &box)
         {-kHalf, 2.0f * kHalf, -kHalf}, {kHalf, 2.0f * kHalf, -kHalf}, {kHalf, 2.0f * kHalf, kHalf},
         {-kHalf, 2.0f * kHalf, kHalf}};
     const std::array<std::array<std::uint32_t, 4>, 6> quads = {{
-        {{0, 3, 2, 1}}, // bottom (-y)
-        {{4, 5, 6, 7}}, // top (+y)
-        {{0, 1, 5, 4}}, // -z
-        {{2, 3, 7, 6}}, // +z
-        {{1, 2, 6, 5}}, // +x
-        {{3, 0, 4, 7}}, // -x
+        {{0, 1, 2, 3}}, // bottom (-y)
+        {{7, 6, 5, 4}}, // top (+y)
+        {{0, 4, 5, 1}}, // -z
+        {{2, 6, 7, 3}}, // +z
+        {{1, 5, 6, 2}}, // +x
+        {{3, 7, 4, 0}}, // -x
     }};
     const glm::vec3 normals[6] = {
         {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, -1.0f},
@@ -232,7 +235,9 @@ void buildSpherePrototype(ObjectPrototype &sphere)
             const std::uint32_t b = a + 1u;
             const std::uint32_t c = a + (kWedges + 1u);
             const std::uint32_t d = c + 1u;
-            sphere.indices.insert(sphere.indices.end(), {a, c, b, b, c, d});
+            // Wound outward (cross(b - a, c - a) points away from the
+            // center), matching the box prototype's convention.
+            sphere.indices.insert(sphere.indices.end(), {a, b, c, b, d, c});
         }
     }
     sphere.halfHeightMeters = kRadius;
@@ -287,9 +292,12 @@ void buildColumnPrototype(ObjectPrototype &column)
             }
         }
     }
-    // Plinth caps: a center vertex per face, one hex fan each. The bottom
-    // fan winds toward -y, the top fan toward +y (the winding vote needs the
-    // whole mesh to agree, and both fans share the side walls' convention).
+    // Plinth caps: a center vertex per face, one hex fan each. Both fans
+    // wind outward (the bottom fan toward -y, the top fan toward +y) with the
+    // same index order - the rim rings run the same way around, so the two
+    // caps share the outward convention the side walls and the body below
+    // carry (an inward fan would cull as a back face and leave a see-through
+    // hole under the winding every backend culls by).
     for (std::uint32_t cap = 0; cap < 2; ++cap)
     {
         const bool        bottom  = cap == 0;
@@ -316,14 +324,7 @@ void buildColumnPrototype(ObjectPrototype &column)
         {
             const std::uint32_t rimA = rimBase + side;
             const std::uint32_t rimB = rimBase + side + 1u;
-            if (bottom)
-            {
-                column.indices.insert(column.indices.end(), {center, rimA, rimB});
-            }
-            else
-            {
-                column.indices.insert(column.indices.end(), {center, rimB, rimA});
-            }
+            column.indices.insert(column.indices.end(), {center, rimA, rimB});
         }
     }
     // Body: side quads between two hex rings.
@@ -944,6 +945,11 @@ void LightingScene::buildStaticMaterials()
         material.baseColor[1] = 0.90f / std::max(1.0e-4f, groundMean[variant][1]);
         material.baseColor[2] = 0.86f / std::max(1.0e-4f, groundMean[variant][2]);
         material.roughnessFactor = 0.92f;
+        // The scene's meshes are generator-wound outward (cross(b - a, c - a)
+        // away from the solid), so every material declares the convention:
+        // the GPU backend culls exactly the faces the software rasterizer's
+        // declared-winding path culls, on every mesh, without its vote.
+        material.frontFaceWinding = 1.0f;
         if (groundAlbedo_[variant] != engine::renderer::invalidTexture)
         {
             material.baseColorTexture = groundAlbedo_[variant];
@@ -967,6 +973,7 @@ void LightingScene::buildStaticMaterials()
         material.baseColor[2] = slot.baseColor[2];
         material.roughnessFactor = slot.roughness;
         material.metallicFactor  = slot.metallic;
+        material.frontFaceWinding = 1.0f;
         if (slot.emissiveIntensity > 0.0f)
         {
             material.emissiveColor[0] = slot.emissiveColor[0] * slot.emissiveIntensity;
@@ -993,6 +1000,7 @@ void LightingScene::buildStaticMaterials()
         material.metallicFactor  = entry.metallic;
         material.opacity          = entry.opacity;
         material.indexOfRefraction = entry.indexOfRefraction;
+        material.frontFaceWinding = 1.0f;
         if (slot == 0 && groundAlbedo_[1] != engine::renderer::invalidTexture)
         {
             // The stone curb: the concrete scan over its own mean, the scan's
@@ -1014,6 +1022,39 @@ void LightingScene::buildStaticMaterials()
                 material.normalScale   = 0.35f;
             }
         }
+        else if (slot == 1 && groundAlbedo_[1] != engine::renderer::invalidTexture)
+        {
+            // The pool floor: the same concrete scan, mean-compensated, as a
+            // plain albedo detail (no normal map - a wet basin floor is
+            // smooth, and relief detail under the water would fight the
+            // refraction). The scan's panel seams and plaster mottle give the
+            // floor a readable pattern, which is what makes the water's
+            // transmission legible: a uniformly colored plate under a
+            // translucent sheet composites to another uniform sheet, while a
+            // tiled floor under the same sheet reads as depth. The UVs run in
+            // meters (see the floor build), so the repeat is scene-scale.
+            float mean[3] = {1.0f, 1.0f, 1.0f};
+            if (renderCapability_.textureMean != nullptr)
+            {
+                RenderError error = RenderError::None;
+                renderCapability_.textureMean(renderCapability_.self, rendererHandle_, groundAlbedo_[1], mean, &error);
+            }
+            material.baseColor[0] /= std::max(1.0e-4f, mean[0]);
+            material.baseColor[1] /= std::max(1.0e-4f, mean[1]);
+            material.baseColor[2] /= std::max(1.0e-4f, mean[2]);
+            material.baseColorTexture = groundAlbedo_[1];
+            if (groundNormal_ != engine::renderer::invalidTexture)
+            {
+                // Wet-plaster relief at tile scale: the scan's albedo is too
+                // smooth to read through a translucent sheet (a +/-3% albedo
+                // variation composites to another flat tint), so the floor
+                // carries the gravel scan's normal map as surface grain -
+                // the same relief treatment the curb gets, at a finer tiling
+                // so the basin reads as laid panels rather than one slab.
+                material.normalTexture = groundNormal_;
+                material.normalScale   = 0.30f;
+            }
+        }
         materialStore_.push_back(material);
     }
 }
@@ -1026,9 +1067,9 @@ bool LightingScene::loadGroundTextures(const std::filesystem::path &assetDirecto
         TextureHandle *target;
     };
     const std::array<GroundScan, 3> scans = {{
-        {"ground_gravel_diff_1k.jpg", &groundAlbedo_[0]},
-        {"ground_concrete_diff_1k.jpg", &groundAlbedo_[1]},
-        {"ground_gravel_nor_gl_1k.jpg", &groundNormal_},
+        {"ground_gravel_diff_1k.ktx2", &groundAlbedo_[0]},
+        {"ground_concrete_diff_1k.ktx2", &groundAlbedo_[1]},
+        {"ground_gravel_nor_gl_1k.ktx2", &groundNormal_},
     }};
     bool allLoaded = true;
     for (const GroundScan &scan : scans)
@@ -1150,7 +1191,7 @@ void LightingScene::placeLights()
         {1.00f, 0.48f, 0.55f}, // rose
         {0.62f, 1.00f, 0.70f}, // mint
         {1.00f, 0.90f, 0.60f}, // warm white
-        {0.80f, 0.60f, 1.00f}, // violet
+        {1.00f, 0.88f, 0.72f}, // candle warm
     };
     for (std::uint32_t index = 0; index < parameters_.lightCount; ++index)
     {
@@ -1167,7 +1208,12 @@ void LightingScene::placeLights()
         description.color[0]  = tint.r;
         description.color[1]  = tint.g;
         description.color[2]  = tint.b;
-        description.intensity = static_cast<float>(38.0 + 52.0 * unit01(lightHash, 5));
+        // The inverse-square term peaks hard near a lamp's own surface: an
+        // intensity this close to the falloff's ceiling saturates the deck
+        // under each lamp into a pure-tint stain (the violet ring the deck
+        // showed), so the range tightens and the floor drops - the pools of
+        // color read as lamps washing the deck instead of colored floods.
+        description.intensity = static_cast<float>(26.0 + 30.0 * unit01(lightHash, 5));
         description.range     = static_cast<float>(26.0 + 30.0 * unit01(lightHash, 6));
         // Static lights sit in a wide ring; orbiting ones live on their track.
         if (!track.orbiting)
@@ -1182,24 +1228,38 @@ void LightingScene::placeLights()
         }
         lightTracks_.push_back(track);
     }
-    // The showcase pool lamp: one warm static point light directly over the
-    // water. The grazing [pbr] sun alone paints broad streak bands on the
-    // pool floor (physically right for a low sun, but a fine caustic NET is
-    // what reads as water caustics) - the lamp's steep cone focuses the
-    // classic net through the ripple normals at every frame, and its direct
-    // term lights the curb and the glass pieces around the pool.
+    // The showcase pool lamp: one warm static point light IN the basin, a
+    // hand's height above the floor. A dusk pool's photograph is the lamp
+    // glow through the water - the floor carries a warm pool of light that
+    // falls off toward the walls (the basin reads as deep), the water sheet
+    // above the lamp glows from below, and the lamp's direct term still
+    // reaches the curb and the glass pieces around the pool. The grazing
+    // [pbr] sun alone cannot do this: at ten degrees of elevation the far
+    // curb shadows most of the floor, and a lamp hanging OVER the pool (the
+    // previous pose) lights the floor at grazing angles whose brightness
+    // lives in the same band as the sheet's own tint - nothing reads as
+    // depth. The transparent water passes the light to the floor exactly as
+    // a real lamp housing under the waterline does.
     if (showcaseBuilt_)
     {
         LightTrack track;
         DirectLightDescription &description = track.description;
         description.type      = DirectLightType::Point;
         description.color[0]  = 1.00f;
-        description.color[1]  = 0.90f;
-        description.color[2]  = 0.72f;
-        description.intensity = 55.0f;
-        description.range     = 34.0f;
+        description.color[1]  = 0.64f;
+        description.color[2]  = 0.30f;
+        description.intensity = 70.0f;
+        description.range     = 18.0f;
+        // The renderer's per-draw light budget is eight, and the registry's
+        // snapshot fills it by descending priority (the deck lamps and this
+        // lamp all default to zero, and ties break by ascending creation
+        // handle - the showcase lamp is created LAST, so at nine lights the
+        // budget dropped exactly this one every frame, and the pool lamp
+        // never shaded anything). One priority point above the deck lamps
+        // keeps the basin's own light in every draw's budget.
+        description.priority  = 1.0f;
         description.position[0] = static_cast<float>(showcasePoolCenter_.x);
-        description.position[1] = 9.0f;
+        description.position[1] = 0.12f;
         description.position[2] = static_cast<float>(showcasePoolCenter_.z);
         lightTracks_.push_back(track);
     }
@@ -1339,12 +1399,17 @@ bool LightingScene::buildShowcase()
 
     // ---- the pool floor (the caustics receiver) ---------------------------
     {
-        // A pale untextured plate: the caustics and the refracted view of the
-        // floor read best without scan detail competing with them.
+        // A pale plaster plate carrying the concrete scan's panel seams (the
+        // material slot 1 build above): the caustics and the refracted view
+        // of the floor keep their clean read at plaster scale, while the
+        // seams give the transmission a pattern to carry. UVs run in meters
+        // at kFloorUvScale so the repeat is scene-scale and orientation-
+        // stable (the curb's own tiling rule).
         std::vector<SceneVertex>   vertices;
         std::vector<std::uint32_t> indices;
         constexpr std::uint32_t kFloorCells = 8; // gentle tessellation; the
         // lighting reads the plate through its card set, not this grid.
+        constexpr float kFloorUvScale = 0.80f; // 1.25 m per scan repeat
         const float hx = static_cast<float>(kWaterHalfX);
         const float hz = static_cast<float>(kWaterHalfZ);
         for (std::uint32_t row = 0; row <= kFloorCells; ++row)
@@ -1359,8 +1424,8 @@ bool LightingScene::buildShowcase()
                 vertex.color[0]    = 1.0f;
                 vertex.color[1]    = 1.0f;
                 vertex.color[2]    = 1.0f;
-                vertex.uv[0]       = static_cast<float>(column) / static_cast<float>(kFloorCells);
-                vertex.uv[1]       = static_cast<float>(row) / static_cast<float>(kFloorCells);
+                vertex.uv[0]       = vertex.position[0] * kFloorUvScale;
+                vertex.uv[1]       = vertex.position[2] * kFloorUvScale;
                 vertices.push_back(vertex);
             }
         }
@@ -1399,30 +1464,60 @@ bool LightingScene::buildShowcase()
 
     // ---- the water surface (the caustics transmitter + refraction face) ---
     {
-        // Two baked ripple octaves perturb the vertex normals (the geometry
-        // stays a plane at the water line): the reflection field breaks the
-        // sun glints over them, the refraction bends through them, and the
-        // photon pass focuses the caustics the same way.
+        // Directional wave spectrum, ANIMATED (see update's re-bake): two
+        // crossing swell trains plus a gentle chop, sampled on the vertex
+        // grid (0.3 m spacing; every wavelength keeps >= 4 samples, so the
+        // normals never alias the way the old 1 m chop on the same grid
+        // did - the "noisy water" read). The phase speeds follow deep-water
+        // dispersion (omega = sqrt(g * k)), so long swells outrun the chop
+        // the way real water moves; the slopes stay under ~0.03 so the
+        // glints stay broad and the caustic net reads as gentle drift.
         std::vector<SceneVertex>   vertices;
         std::vector<std::uint32_t> indices;
         constexpr std::uint32_t kWaterCellsX = 48;
         constexpr std::uint32_t kWaterCellsZ = 32;
         const float hx = static_cast<float>(kWaterHalfX);
         const float hz = static_cast<float>(kWaterHalfZ);
-        const auto rippleHeight = [&](double x, double z, double &dHdx, double &dHdz) {
-            // Three octaves: two broad swells and one short chop. The chop is
-            // what makes the caustic net read at pool scale - each wavelength
-            // focuses its own mesh of lines on the floor.
-            const double octave1 = 0.030 * std::sin(1.30 * x + 0.95 * z);
-            const double octave2 = 0.020 * std::sin(2.60 * x - 1.90 * z + 1.7);
-            const double octave3 = 0.009 * std::sin(5.10 * x + 3.80 * z + 0.6);
-            dHdx = 0.030 * 1.30 * std::cos(1.30 * x + 0.95 * z)
-                + 0.020 * 2.60 * std::cos(2.60 * x - 1.90 * z + 1.7)
-                + 0.009 * 5.10 * std::cos(5.10 * x + 3.80 * z + 0.6);
-            dHdz = 0.030 * 0.95 * std::cos(1.30 * x + 0.95 * z)
-                - 0.020 * 1.90 * std::cos(2.60 * x - 1.90 * z + 1.7)
-                + 0.009 * 3.80 * std::cos(5.10 * x + 3.80 * z + 0.6);
-            return octave1 + octave2 + octave3;
+        poolWaterCellsX_ = kWaterCellsX;
+        poolWaterCellsZ_ = kWaterCellsZ;
+        poolWaterHalfX_  = hx;
+        poolWaterHalfZ_  = hz;
+        poolWaterY_      = static_cast<float>(kWaterY);
+        const auto rippleNormal = [](double x, double z, double time, float &outNx, float &outNy, float &outNz) {
+            // Slopes of the summed trains (analytic derivatives; the height
+            // itself never renders - the geometry stays a plane).
+            //   train 1: wavelength 5.4 m, from ~+25 deg off +X
+            //   train 2: wavelength 2.9 m, from ~-20 deg off +Z
+            //   chop:    wavelength 1.5 m, along the diagonal
+            const double g = 9.81;
+            struct Train
+            {
+                double kx;
+                double kz;
+                double amplitude;
+                double omega;
+            };
+            const double k1 = 6.283185307179586 / 5.4;
+            const double k2 = 6.283185307179586 / 2.9;
+            const double k3 = 6.283185307179586 / 1.5;
+            const Train trains[3] = {
+                {k1 * 0.906, k1 * 0.423, 0.024, std::sqrt(g * k1)},
+                {k2 * -0.342, k2 * 0.940, 0.012, std::sqrt(g * k2)},
+                {k3 * 0.707, k3 * 0.707, 0.005, std::sqrt(g * k3)},
+            };
+            double dHdx = 0.0;
+            double dHdz = 0.0;
+            for (const Train &train : trains)
+            {
+                const double phase = train.kx * x + train.kz * z - train.omega * time;
+                const double derivative = train.amplitude * std::cos(phase);
+                dHdx += derivative * train.kx;
+                dHdz += derivative * train.kz;
+            }
+            const double length = std::sqrt(dHdx * dHdx + 1.0 + dHdz * dHdz);
+            outNx = static_cast<float>(-dHdx / length);
+            outNy = static_cast<float>(1.0 / length);
+            outNz = static_cast<float>(-dHdz / length);
         };
         for (std::uint32_t row = 0; row <= kWaterCellsZ; ++row)
         {
@@ -1430,17 +1525,17 @@ bool LightingScene::buildShowcase()
             {
                 const double x = -hx + 2.0 * hx * static_cast<double>(column) / static_cast<double>(kWaterCellsX);
                 const double z = -hz + 2.0 * hz * static_cast<double>(row) / static_cast<double>(kWaterCellsZ);
-                double dHdx = 0.0;
-                double dHdz = 0.0;
-                (void)rippleHeight(x, z, dHdx, dHdz);
-                const double length = std::sqrt(dHdx * dHdx + 1.0 + dHdz * dHdz);
+                float nx = 0.0f;
+                float ny = 1.0f;
+                float nz = 0.0f;
+                rippleNormal(x, z, 0.0, nx, ny, nz);
                 SceneVertex vertex{};
                 vertex.position[0] = static_cast<float>(x);
                 vertex.position[1] = static_cast<float>(kWaterY);
                 vertex.position[2] = static_cast<float>(z);
-                vertex.normal[0]   = static_cast<float>(-dHdx / length);
-                vertex.normal[1]   = static_cast<float>(1.0 / length);
-                vertex.normal[2]   = static_cast<float>(-dHdz / length);
+                vertex.normal[0]   = nx;
+                vertex.normal[1]   = ny;
+                vertex.normal[2]   = nz;
                 vertex.color[0]    = 1.0f;
                 vertex.color[1]    = 1.0f;
                 vertex.color[2]    = 1.0f;
@@ -1469,6 +1564,20 @@ bool LightingScene::buildShowcase()
                 static_cast<std::uint32_t>(error));
             return false;
         }
+        // The scratch matches the CANONICAL vertex stride (11 floats - the
+        // layout canonicalAttributes declares and updateMeshVertices reads).
+        // It previously used a 12-float stride (a full 48-byte slot per
+        // 44-byte vertex): every vertex past the first was read shifted by
+        // its own overflow, with the slot's four trailing bytes holding
+        // UNINITIALIZED memory - the re-described water rendered as an
+        // exploded pile of jagged translucent shards draping far past the
+        // pool (the "prism overlapping the pool" read), and it did so from
+        // the first animated frame.
+        poolWaterVertexScratch_.resize(vertices.size() * kVertexFloats);
+        for (std::size_t vertex = 0; vertex < vertices.size(); ++vertex)
+        {
+            std::memcpy(&poolWaterVertexScratch_[vertex * kVertexFloats], &vertices[vertex], sizeof(SceneVertex));
+        }
         poolWaterGeometry_.positions.reserve(vertices.size());
         poolWaterGeometry_.normals.reserve(vertices.size());
         poolWaterGeometry_.colors.reserve(vertices.size());
@@ -1489,7 +1598,7 @@ bool LightingScene::buildShowcase()
     showcaseMaterials_.clear();
     showcaseMaterials_.push_back({{0.62f, 0.60f, 0.55f}, 0.85f, 0.0f, 1.0f, 1.5f});  // stone
     showcaseMaterials_.push_back({{0.82f, 0.80f, 0.74f}, 0.55f, 0.0f, 1.0f, 1.5f});  // pool floor
-    showcaseMaterials_.push_back({{0.55f, 0.78f, 0.85f}, 0.03f, 0.0f, 0.42f, 1.33f}); // water
+    showcaseMaterials_.push_back({{0.10f, 0.32f, 0.38f}, 0.04f, 0.0f, 0.62f, 1.33f}); // water
     showcaseMaterials_.push_back({{0.90f, 0.96f, 0.94f}, 0.04f, 0.0f, 0.16f, 1.50f}); // glass
     showcaseMaterials_.push_back({{0.94f, 0.94f, 0.97f}, 0.05f, 0.96f, 1.0f, 1.5f}); // chrome
 
@@ -1740,6 +1849,13 @@ bool LightingScene::registerSurfaces()
             {
                 return false;
             }
+            if (mesh.materialSlot == 2u)
+            {
+                // The animated water re-describes its surface every update
+                // (see updateWater): remember the handles.
+                poolWaterGiSurface_           = giHandle;
+                poolWaterReflectionSurface_   = reflectionHandle;
+            }
             groundGiSurfaces_.push_back(giHandle);
             groundReflectionSurfaces_.push_back(reflectionHandle);
             ++counts_.showcaseSurfaces;
@@ -1850,7 +1966,159 @@ void LightingScene::update(double simSeconds, const glm::dvec3 &cameraEyeAnchorR
             directLightingCapability_->updateLight(directLightingCapability_->self, track.handle, &updated, &error);
         }
     }
+    updateWater(simSeconds);
     composeDrawCommands();
+}
+
+void LightingScene::updateWater(double simSeconds)
+{
+    // The animated pool: the wave spectrum's phase advances with the
+    // simulation clock, the vertex normals re-bake on the grid (the geometry
+    // stays a plane), the renderer mesh re-uploads, and both lighting
+    // registries re-describe the surface so the traced refraction and the
+    // caustic photon pass follow the moving normals. The re-bake is a few
+    // thousand sin/cos calls on a 49x33 grid - noise next to the lighting
+    // evaluates - and skips itself when the clock has not advanced (a
+    // paused or static capture keeps the exact baked frame).
+    if (poolWaterMesh_ == engine::renderer::invalidMesh || poolWaterCellsX_ == 0 || poolWaterCellsZ_ == 0
+        || poolWaterVertexScratch_.empty())
+    {
+        return;
+    }
+    if (simSeconds == poolWaterLastBakeSeconds)
+    {
+        return;
+    }
+    // The lighting registries re-describe at HALF the frame rate: the
+    // gentle 5.4 m swell moves 2.9 m/s, so a 30 Hz refresh still steps the
+    // caustic net and the refraction smoothly, while the re-capture and the
+    // probe invalidation the re-describe triggers run half as often (the
+    // renderer mesh still re-uploads every frame - the specular glints ride
+    // the fresh normals at full rate).
+    const bool refreshRegistries = [this, simSeconds]()
+    {
+        static constexpr double kRegistryRefreshSeconds = 1.0 / 30.0;
+        const double now = std::floor(simSeconds / kRegistryRefreshSeconds);
+        const double last = std::floor(poolWaterLastBakeSeconds / kRegistryRefreshSeconds);
+        return now != last;
+    }();
+
+    poolWaterLastBakeSeconds = simSeconds;
+    const auto rippleNormal = [](double x, double z, double time, float &outNx, float &outNy, float &outNz) {
+        const double g  = 9.81;
+        const double k1 = 6.283185307179586 / 5.4;
+        const double k2 = 6.283185307179586 / 2.9;
+        const double k3 = 6.283185307179586 / 1.5;
+        const struct Train
+        {
+            double kx;
+            double kz;
+            double amplitude;
+            double omega;
+        } trains[3] = {
+            {k1 * 0.906, k1 * 0.423, 0.024, std::sqrt(g * k1)},
+            {k2 * -0.342, k2 * 0.940, 0.012, std::sqrt(g * k2)},
+            {k3 * 0.707, k3 * 0.707, 0.005, std::sqrt(g * k3)},
+        };
+        double dHdx = 0.0;
+        double dHdz = 0.0;
+        for (const Train &train : trains)
+        {
+            const double phase     = train.kx * x + train.kz * z - train.omega * time;
+            const double derivative = train.amplitude * std::cos(phase);
+            dHdx += derivative * train.kx;
+            dHdz += derivative * train.kz;
+        }
+        const double length = std::sqrt(dHdx * dHdx + 1.0 + dHdz * dHdz);
+        outNx = static_cast<float>(-dHdx / length);
+        outNy = static_cast<float>(1.0 / length);
+        outNz = static_cast<float>(-dHdz / length);
+    };
+    const std::uint32_t cellsX = poolWaterCellsX_;
+    const std::uint32_t cellsZ = poolWaterCellsZ_;
+    const float        hx      = poolWaterHalfX_;
+    const float        hz      = poolWaterHalfZ_;
+    for (std::uint32_t row = 0; row <= cellsZ; ++row)
+    {
+        for (std::uint32_t column = 0; column <= cellsX; ++column)
+        {
+            const std::size_t vertexIndex = static_cast<std::size_t>(row) * (cellsX + 1u) + column;
+            const double x = -hx + 2.0 * static_cast<double>(hx) * column / cellsX;
+            const double z = -hz + 2.0 * static_cast<double>(hz) * row / cellsZ;
+            float nx = 0.0f;
+            float ny = 1.0f;
+            float nz = 0.0f;
+            rippleNormal(x, z, simSeconds, nx, ny, nz);
+            // Vertex layout (canonicalAttributes): position 0-2, normal 3-5,
+            // color 6-8, uv 9-10, stride kVertexFloats floats.
+            const std::size_t base = vertexIndex * kVertexFloats;
+            poolWaterVertexScratch_[base + 3u] = nx;
+            poolWaterVertexScratch_[base + 4u] = ny;
+            poolWaterVertexScratch_[base + 5u] = nz;
+            poolWaterGeometry_.normals[vertexIndex] = glm::vec3(nx, ny, nz);
+        }
+    }
+    engine::renderer::RenderError meshError = engine::renderer::RenderError::None;
+    if (!renderCapability_.updateMeshVertices(renderCapability_.self, rendererHandle_, poolWaterMesh_,
+            poolWaterVertexScratch_.data(), static_cast<std::uint32_t>(poolWaterVertexScratch_.size() / kVertexFloats),
+            &meshError))
+    {
+        std::fprintf(stderr, "demo_lighting: water vertex update failed (error %u)\n",
+            static_cast<std::uint32_t>(meshError));
+    }
+    // Re-describe the water for both lighting registries (normals changed;
+    // positions, colors and indices are the original arrays). The transform
+    // is the pool placement captured at registration time - identical to
+    // what registerBorrowedGeometry composed.
+    const glm::mat4 poolTransform = composeTransform(showcasePoolCenter_, 0.0f, 1.0f);
+    if (refreshRegistries && giCapability_ != nullptr && poolWaterGiSurface_ != invalidGiSurface)
+    {
+        GiSurfaceDescription description;
+        description.positions           = &poolWaterGeometry_.positions[0].x;
+        description.positionStrideBytes = sizeof(glm::vec3);
+        description.normals             = &poolWaterGeometry_.normals[0].x;
+        description.normalStrideBytes   = sizeof(glm::vec3);
+        description.colors              = &poolWaterGeometry_.colors[0].x;
+        description.colorStrideBytes    = sizeof(glm::vec3);
+        description.indices             = poolWaterGeometry_.indices.data();
+        description.vertexCount         = static_cast<std::uint32_t>(poolWaterGeometry_.positions.size());
+        description.indexCount          = static_cast<std::uint32_t>(poolWaterGeometry_.indices.size());
+        std::memcpy(description.transform, &poolTransform[0][0], sizeof(description.transform));
+        description.albedoColor[0] = showcaseMaterials_[2u].baseColor[0];
+        description.albedoColor[1] = showcaseMaterials_[2u].baseColor[1];
+        description.albedoColor[2] = showcaseMaterials_[2u].baseColor[2];
+        description.opacity         = showcaseMaterials_[2u].opacity;
+        description.indexOfRefraction = showcaseMaterials_[2u].indexOfRefraction;
+        description.flagBits         = giSurfaceFlagDynamic;
+        GiError error = GiError::None;
+        giCapability_->updateSurface(giCapability_->self, poolWaterGiSurface_, &description, &error);
+    }
+    if (refreshRegistries && reflectionCapability_ != nullptr
+        && poolWaterReflectionSurface_ != engine::reflection_field::invalidReflectionSurface)
+    {
+        engine::reflection_field::ReflectionSurfaceDescription description;
+        description.positions           = &poolWaterGeometry_.positions[0].x;
+        description.positionStrideBytes = sizeof(glm::vec3);
+        description.normals             = &poolWaterGeometry_.normals[0].x;
+        description.normalStrideBytes   = sizeof(glm::vec3);
+        description.colors              = &poolWaterGeometry_.colors[0].x;
+        description.colorStrideBytes    = sizeof(glm::vec3);
+        description.indices             = poolWaterGeometry_.indices.data();
+        description.vertexCount         = static_cast<std::uint32_t>(poolWaterGeometry_.positions.size());
+        description.indexCount          = static_cast<std::uint32_t>(poolWaterGeometry_.indices.size());
+        std::memcpy(description.transform, &poolTransform[0][0], sizeof(description.transform));
+        description.albedoColor[0] = showcaseMaterials_[2u].baseColor[0];
+        description.albedoColor[1] = showcaseMaterials_[2u].baseColor[1];
+        description.albedoColor[2] = showcaseMaterials_[2u].baseColor[2];
+        description.roughness       = showcaseMaterials_[2u].roughness;
+        description.metallic        = showcaseMaterials_[2u].metallic;
+        description.opacity         = showcaseMaterials_[2u].opacity;
+        description.indexOfRefraction = showcaseMaterials_[2u].indexOfRefraction;
+        description.flagBits         = engine::reflection_field::reflectionSurfaceFlagDynamic;
+        engine::reflection_field::ReflectionError error = engine::reflection_field::ReflectionError::None;
+        reflectionCapability_->updateSurface(reflectionCapability_->self, poolWaterReflectionSurface_, &description,
+            &error);
+    }
 }
 
 void LightingScene::composeDrawCommands()
@@ -2045,6 +2313,49 @@ std::uint32_t LightingScene::selfTest()
         const std::uint64_t cellHash = mix64(parameters_.seed ^ 0x4B9A2C31D17E4F5Dull);
         const double        firstJitter = unit01(cellHash, 1);
         if (!(firstJitter >= 0.0 && firstJitter <= 1.0))
+        {
+            ++failures;
+        }
+    }
+    // Prototype winding: every mesh declares the outward convention
+    // (MeshMaterial::frontFaceWinding = +1), so the generators must actually
+    // wind outward - an inward face culls away on every backend's declared
+    // path. Each triangle's face normal must point away from the prototype's
+    // vertex centroid (degenerate slivers carry no normal and pass).
+    for (std::size_t slot = 0; slot < prototypePositions_.size(); ++slot)
+    {
+        const std::vector<glm::vec3>        &positions = prototypePositions_[slot];
+        const std::vector<std::uint32_t>    &indices   = prototypeIndices_[slot];
+        if (positions.empty() || indices.empty())
+        {
+            ++failures;
+            continue;
+        }
+        glm::vec3 centroid(0.0f);
+        for (const glm::vec3 &position : positions)
+        {
+            centroid += position;
+        }
+        centroid /= static_cast<float>(positions.size());
+        bool windingOutward = true;
+        for (std::size_t triangle = 0; triangle + 2 < indices.size(); triangle += 3)
+        {
+            const glm::vec3 &a = positions[indices[triangle]];
+            const glm::vec3 &b = positions[indices[triangle + 1]];
+            const glm::vec3 &c = positions[indices[triangle + 2]];
+            const glm::vec3  faceNormal = glm::cross(b - a, c - a);
+            if (glm::dot(faceNormal, faceNormal) < 1.0e-12f)
+            {
+                continue; // degenerate sliver (the sphere's pole band)
+            }
+            const glm::vec3 triangleCentroid = (a + b + c) / 3.0f;
+            if (glm::dot(faceNormal, triangleCentroid - centroid) <= 0.0f)
+            {
+                windingOutward = false;
+                break;
+            }
+        }
+        if (!windingOutward)
         {
             ++failures;
         }

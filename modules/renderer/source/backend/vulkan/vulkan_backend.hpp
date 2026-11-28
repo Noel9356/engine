@@ -115,6 +115,8 @@ public:
     bool updateMeshVertices(MeshHandle mesh, const void *vertices, std::uint32_t vertexCount, RenderError *error) override;
 
     bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error) override;
+    bool createBlockTexture(TextureHandle id, const BlockTextureDescription &description, RenderError *error) override;
+    [[nodiscard]] BlockTextureFormatSupport blockFormatSupport() const override;
     void destroyTexture(TextureHandle texture) override;
 
     FrameStatistics statistics() const override
@@ -349,9 +351,13 @@ private:
     BoundPipeline   lastBoundPipeline_          = BoundPipeline::Mesh;
     bool            lastMeshDepthWrite_         = true;
     bool            lastMeshTwoSided_           = false;
-    bool            lastMeshTransparent_       = false;
+    bool            lastMeshCwWinding_          = false;
+    bool            lastMeshTransparent_        = false;
     MeshHandle      lastBoundMesh_              = invalidMesh;
     VkDescriptorSet lastBoundMaterialSet_       = VK_NULL_HANDLE;
+    // The frame's currently bound material-extension dynamic offset (set 2);
+    // 0xFFFFFFFF = nothing bound yet this frame.
+    std::uint32_t   lastMaterialExtensionOffset_ = 0xFFFFFFFFu;
     VkDeviceSize    lastBoundInstanceOffset_    = 0;
     bool            hasLastBoundInstanceBuffer_ = false;
 
@@ -375,6 +381,20 @@ private:
     std::uint64_t        probeGridRevision_    = 0;
     bool                 probeGridDirty_       = false;
     std::vector<float>   packedProbeRecords_{}; // giProbeRecordFloats floats per probe
+
+    // reflection_field hook: setReflectionField copies the borrowed snapshot
+    // into pendingReflectionField_ and bumps pendingFieldRevision_ (the copy
+    // happens between frames, while previous frames may still be executing,
+    // so the per-slot staging write must wait for the recording slot to
+    // retire inside beginFrame). fieldViewProjection_ / fieldMeta_ ride the
+    // frame uniform; the per-slot RGBA32F images live in VulkanResources.
+    std::vector<float>    pendingReflectionField_{};
+    std::uint32_t         pendingFieldWidth_    = 0;
+    std::uint32_t         pendingFieldHeight_   = 0;
+    float                 pendingFieldMaxRoughness_ = 0.0f;
+    glm::mat4             fieldViewProjection_{};
+    std::uint64_t         pendingFieldRevision_ = 0;
+    bool                  fieldUniformHeaderValid_ = false;
 
     FrameUniformData cachedFrameUniform_{}; // rebuilt only when inputs change (frameUniformDirty_)
     std::uint64_t    frameUniformRevision_ = 0;

@@ -509,6 +509,16 @@ void PlanetChunkRenderer::setTerrainTextureGates(double groundTextureMaxDistance
         ? groundReliefMaxDistanceMeters * groundReliefMaxDistanceMeters : 0.0;
 }
 
+void PlanetChunkRenderer::setGroundDetailNormal(engine::renderer::TextureHandle detailNormal, float detailUvScale,
+    float detailFadeStartMeters, float detailFadeEndMeters, float detailStrength)
+{
+    groundDetailNormal_ = detailNormal;
+    groundDetailUvScale_ = std::max(detailUvScale, 0.0f);
+    groundDetailFadeStartMeters_ = std::max(detailFadeStartMeters, 0.0f);
+    groundDetailFadeEndMeters_ = std::max(detailFadeEndMeters, groundDetailFadeStartMeters_ + 0.1f);
+    groundDetailStrength_ = std::clamp(detailStrength, 0.0f, 4.0f);
+}
+
 void PlanetChunkRenderer::destroyChunkMeshes(ChunkMeshHandles &handles)
 {
     if (renderer_ == nullptr || rendererHandle_ == renderer::invalidRenderer)
@@ -872,14 +882,15 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             // empty variant set (every scan failed to load) draws the group
             // untextured through the neutral stand-in, like a missing gate.
             static const TerrainTextureVariant untextured{};
-            // Snow gate: the chunk's center climate classifies once, lazily
-            // (the sample is cheap but per-frame would be waste). Snow-biome
-            // chunks keep the detail multiply (the composed scan's blades
-            // read as wind-textured snow at a distance) but drop the normal
-            // scale hard - the blade-relief sheet magnified across a
-            // snowfield photographs as combed parallel lines no real
-            // snowpack shows, while a faint diffuse mottle is exactly the
-            // wind-ripple texture fresh snow photographs with.
+            // Climate classification: the chunk's center biome classifies
+            // once, lazily (the sample is cheap but per-frame would be
+            // waste). Two reads memoize together: the snow gate (snow-biome
+            // chunks keep the detail multiply but drop the normal scale
+            // hard - the blade-relief sheet magnified across a snowfield
+            // photographs as combed parallel lines no real snowpack shows,
+            // while a faint diffuse mottle is exactly the wind-ripple
+            // texture fresh snow photographs with) and the ground variant
+            // pool's biome affinity (the pick below).
             if (!handles.groundSnowyBuilt)
             {
                 handles.groundSnowyBuilt = true;
@@ -899,6 +910,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
                                 centerRadius, &centerSample))
                         {
                             handles.groundSnowy = centerSample.biome == planet::Biome::Snow;
+                            handles.groundBiomeSlot = static_cast<std::uint32_t>(centerSample.biome);
                         }
                     }
                 }
@@ -906,11 +918,59 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             const bool groundTextured
                 = !groundTextureVariants_.empty()
                 && draw.distanceSquared <= groundTextureMaxDistanceMetersSquared_;
+            // The per-chunk pick draws from the variants the chunk's own
+            // biome allows (see TerrainTextureVariant::biomeMask), then
+            // hashes within that pool: a grassland photographs a grass
+            // scan, a desert a sand scan, and neighbors inside one biome
+            // still rotate between the pool's members (the hash breaks the
+            // single-scan repeat without cross-biome patchwork - the random
+            // pick over the untyped pool painted desert scans onto
+            // grassland chunks, which the aerial views read as pale facet
+            // polygons lying across the green). An empty affinity pool
+            // (no variant carries the biome) falls back to the untyped
+            // whole set, and a fully-empty set draws untextured.
+            const std::uint32_t biomeBit = 1u << (handles.groundBiomeSlot % 31u);
             const std::uint64_t chunkSeed = engine::planet::hashCombine64(
                 draw.entry->first, static_cast<std::uint64_t>(groundTextureVariants_.size()));
-            const TerrainTextureVariant &groundVariant = groundTextured
-                ? groundTextureVariants_[static_cast<std::size_t>(chunkSeed % groundTextureVariants_.size())]
-                : untextured;
+            std::uint32_t poolCount = 0u;
+            std::uint32_t untypedCount = 0u;
+            for (const TerrainTextureVariant &variant : groundTextureVariants_)
+            {
+                if (variant.biomeMask == 0u)
+                {
+                    ++untypedCount;
+                }
+                else if ((variant.biomeMask & biomeBit) != 0u)
+                {
+                    ++poolCount;
+                }
+            }
+            const TerrainTextureVariant *groundVariantPtr = nullptr;
+            if (groundTextured && (poolCount != 0u || untypedCount != 0u))
+            {
+                const std::uint32_t pickFrom = poolCount != 0u ? poolCount : untypedCount;
+                const std::uint32_t pick = static_cast<std::uint32_t>(chunkSeed % pickFrom);
+                std::uint32_t seen = 0u;
+                for (const TerrainTextureVariant &variant : groundTextureVariants_)
+                {
+                    if (poolCount != 0u && (variant.biomeMask == 0u || (variant.biomeMask & biomeBit) == 0u))
+                    {
+                        continue;
+                    }
+                    if (seen == pick)
+                    {
+                        groundVariantPtr = &variant;
+                        break;
+                    }
+                    ++seen;
+                }
+                if (groundVariantPtr == nullptr && !groundTextureVariants_.empty())
+                {
+                    groundVariantPtr = &groundTextureVariants_.front();
+                }
+            }
+            const TerrainTextureVariant &groundVariant = groundVariantPtr != nullptr
+                ? *groundVariantPtr : untextured;
             renderer::MeshMaterial material{};
             // Inside the texture gate the base color carries the SELECTED
             // variant's mean compensation (see setTerrainTextures), so the
@@ -950,7 +1010,20 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
                 && groundVariant.normal != renderer::invalidTexture
                 && draw.distanceSquared <= groundReliefMaxDistanceMetersSquared_;
             material.normalTexture = groundRelief ? groundVariant.normal : renderer::invalidTexture;
-            material.normalScale = handles.groundSnowy ? 0.16f : 0.72f;
+            material.normalScale = handles.groundSnowy ? 0.16f : 8.0f;
+            // Near-field relief overlay (setGroundDetailNormal): the
+            // finer-tiling grass-blade normal map fades in per pixel as the
+            // eye descends (full under detailFadeStart, gone beyond
+            // detailFadeEnd), so the ground gains grain on approach instead
+            // of re-showing the same 8 m tiling at every distance. The
+            // overlay applies to every ground chunk - the per-pixel fade
+            // keeps the far ones untouched.
+            material.detailNormalTexture = groundDetailNormal_;
+            material.detailUvScale = groundDetailUvScale_;
+            material.detailFadeStartMeters = groundDetailFadeStartMeters_;
+            material.detailFadeEndMeters = groundDetailFadeEndMeters_;
+            material.detailStrength = handles.groundSnowy ? groundDetailStrength_ * 0.35f
+                                                          : groundDetailStrength_;
             // Procedural mottle (MeshMaterial::noiseScaleMeters): the world-
             // anchored value noise the renderer shades per pixel. The base
             // wavelength rides between the tussock scale and the soil-patch
@@ -959,7 +1032,7 @@ void PlanetChunkRenderer::rebuildDrawCommands(const glm::mat4 &viewProjection, c
             // mottle, and this fills the band between with variation no
             // lattice repeats and no gate cuts off.
             material.noiseScaleMeters = 1.0f;
-            material.noiseStrength = handles.groundSnowy ? 0.06f : 0.18f;
+            material.noiseStrength = handles.groundSnowy ? 0.10f : 0.34f;
             // The planet mesher's terrain winding is fixed (see the
             // meshing module): declaring it enables exact per-triangle
             // back-face culling, so a rugged chunk's hidden far side
@@ -1445,6 +1518,7 @@ void PlanetChunkRenderer::ensureCloudTexture(const glm::dvec3 &sunDirection)
         coveragePixels.swap(blurred);
     }
 
+
     // Phase 3: the lit RGB, derived from the BLURRED coverage for every
     // texel whose alpha survived it (deriving RGB from the raw field left
     // the blur's fringe texels carrying alpha with a zero RGB - the dark
@@ -1471,8 +1545,8 @@ void PlanetChunkRenderer::ensureCloudTexture(const glm::dvec3 &sunDirection)
             // scatterers at every thickness), and bases darker than that
             // photograph as gray paint smears over the terrain.
             const double thickness = std::pow(coverage, 0.7);
-            // Bank-top mottle: two seed-fixed simplex octaves at cloud-field
-            // feature fractions (a few kilometres on the showcase), riding
+            // Bank-top mottle: two seed-fixed simplex octaves at
+            // footprint-relative feature scales, riding
             // the shading the way real decks photograph - a bank's interior
             // carries bright crests and dimmer troughs from the convection
             // that built it. Without this the minified bake reads as smooth
@@ -1480,16 +1554,34 @@ void PlanetChunkRenderer::ensureCloudTexture(const glm::dvec3 &sunDirection)
             // interiors to one flat shade, and nothing inside a bank
             // suggests the volume it stands for. The jitter stays gentle
             // (the deck must stay near-white) but breaks every interior.
-            const double bankFreqA = params_.radiusMeters / 3000.0;
-            const double bankFreqB = params_.radiusMeters / 1200.0;
+            // The feature scale rides the bake's OWN footprint (five and
+            // two-and-a-half texels per feature): from orbit a bank's top
+            // undulates at the ~100 km scale, and the metric few-km
+            // wavelengths an earlier revision used sat an order of
+            // magnitude under the texel - sub-texel octaves alias into
+            // per-texel salt-and-pepper inside every bank, the "noisy
+            // dither" read the space captures showed.
+            const double bankWavelengthA = 9.0 * texelFootprintMeters;
+            const double bankWavelengthB = 4.5 * texelFootprintMeters;
+            const double bankWavelengthC = 2.25 * texelFootprintMeters;
+            const double bankFreqA = 3.141592653589793 * params_.radiusMeters / (2.0 * bankWavelengthA);
+            const double bankFreqB = 3.141592653589793 * params_.radiusMeters / (2.0 * bankWavelengthB);
+            const double bankFreqC = 3.141592653589793 * params_.radiusMeters / (2.0 * bankWavelengthC);
             const double bankJitterA = planet::noise::simplex3ImproveXY(
                 static_cast<std::int64_t>(params_.seed) + 0x9E3779B9LL,
                 direction.x * bankFreqA, direction.y * bankFreqA, direction.z * bankFreqA);
             const double bankJitterB = planet::noise::simplex3ImproveXY(
                 static_cast<std::int64_t>(params_.seed) + 0x71E9AD24LL,
                 direction.x * bankFreqB, direction.y * bankFreqB, direction.z * bankFreqB);
+            // The C octave rides just above the two-texel aliasing floor
+            // (the fringe blur's reach): it adds the fine cumulus grain a
+            // two-octave mottle lacks without dissolving into per-texel
+            // dither (the salt-and-pepper the sub-texel octaves produced).
+            const double bankJitterC = planet::noise::simplex3ImproveXY(
+                static_cast<std::int64_t>(params_.seed) + 0x243F6A88LL,
+                direction.x * bankFreqC, direction.y * bankFreqC, direction.z * bankFreqC);
             const double shade = (0.52 + 0.48 * thickness)
-                * (1.0 + 0.10 * bankJitterA + 0.06 * bankJitterB);
+                * (1.0 + 0.10 * bankJitterA + 0.06 * bankJitterB + 0.04 * bankJitterC);
             // Sun lighting: the same environment bake the lit terrain
             // receives (hemispheric ambient plus the sun's Lambertian term),
             // evaluated per texel - bright banks under the sun, cool banks
@@ -1528,18 +1620,17 @@ void PlanetChunkRenderer::ensureCloudTexture(const glm::dvec3 &sunDirection)
                 cloudTexturePixels_[index + static_cast<std::size_t>(channel)]
                     = static_cast<std::uint8_t>(std::clamp(value, 0.0, 1.0) * 255.0);
             }
-            // The shell's alpha runs the blurred coverage through a clear-band
-            // ramp before it blends: the coverage field's mid values are the
-            // weather provinces' own partial cover, and mapping them linearly
-            // hangs a semi-opaque haze over most of the disc from orbit - a
-            // frosted marble that buries the land/ocean contrast under the
-            // cloud story. The ramp keeps sub-band coverage CLEAR (the gaps
-            // real Earth photography shows between cloud systems), holds the
-            // wisps as thin partial banks inside the band, and leaves bank
-            // cores fully opaque; the ground deck's own bake
-            // (coverageTexelGround) is a separate consumer and keeps its
-            // softer mapping.
-            const double shellAlpha = planet::smoothstep(0.16, 0.60, coverage);
+            // The shell's alpha runs the blurred coverage through a
+            // wide partial-band ramp before it blends: the coverage field's
+            // mid values are the banks' own thinning fringes and broken
+            // deck interiors (the cumulus gaps real Earth photography shows
+            // inside a system), and a steep ramp bins them into a binary
+            // mask (the "thresholded noise texture" read). The ramp keeps
+            // only the sub-band tail clear - a genuine clear sky - while
+            // partial coverage composites as thin cloud; bank cores read
+            // fully opaque. The ground deck's own bake (coverageTexelGround)
+            // is a separate consumer and keeps its softer mapping.
+            const double shellAlpha = planet::smoothstep(0.34, 0.92, coverage);
             cloudTexturePixels_[index + 3u] = static_cast<std::uint8_t>(shellAlpha * 255.0);
         }
     }
@@ -1558,6 +1649,107 @@ void PlanetChunkRenderer::ensureCloudTexture(const glm::dvec3 &sunDirection)
             row = std::clamp(row, std::int64_t{0}, static_cast<std::int64_t>(kHeight) - 1);
             return static_cast<double>(cloudTexturePixels_[(static_cast<std::size_t>(row) * kWidth
                 + static_cast<std::size_t>(column)) * 4u + 3u]) / 255.0;
+        };
+        // The gradient source is a BLURRED copy of the alpha: the raw alpha
+        // steps 0->1 across a two-texel bank edge, and a per-texel
+        // derivative of that step is a +-0.45 dither riding every edge -
+        // at the globe view the bake minifies barely below 1:1, so no mip
+        // chain averages it away and the edges read as salt-and-pepper.
+        // Two of the fringe blur's own separable passes leave the billow-
+        // scale relief (the ~18-texel lobes) fully standing.
+        std::vector<double> alphaSmooth(kWidth * kHeight, 0.0);
+        for (std::uint32_t y = 0; y < kHeight; ++y)
+        {
+            for (std::uint32_t x = 0; x < kWidth; ++x)
+            {
+                alphaSmooth[static_cast<std::size_t>(y) * kWidth + x] = alphaAt(x, y);
+            }
+        }
+        for (int blurPass = 0; blurPass < 2; ++blurPass)
+        {
+            std::vector<double> blurred(alphaSmooth.size(), 0.0);
+            for (std::uint32_t y = 0; y < kHeight; ++y)
+            {
+                for (std::uint32_t x = 0; x < kWidth; ++x)
+                {
+                    const double horizontal
+                        = (alphaSmooth[static_cast<std::size_t>(y) * kWidth
+                            + static_cast<std::size_t>((x + kWidth - 1u) % kWidth)]
+                            + 2.0 * alphaSmooth[static_cast<std::size_t>(y) * kWidth + x]
+                            + alphaSmooth[static_cast<std::size_t>(y) * kWidth
+                                + static_cast<std::size_t>((x + 1u) % kWidth)])
+                        * 0.25;
+                    const double vertical
+                        = (alphaSmooth[static_cast<std::size_t>(std::clamp(y, 1u, kHeight - 1u)) * kWidth + x]
+                            + 2.0 * alphaSmooth[static_cast<std::size_t>(y) * kWidth + x]
+                            + alphaSmooth[static_cast<std::size_t>(std::clamp(y + 1u, 0u, kHeight - 1u)) * kWidth + x])
+                        * 0.25;
+                    blurred[static_cast<std::size_t>(y) * kWidth + x] = (horizontal + vertical) * 0.5;
+                }
+            }
+            alphaSmooth.swap(blurred);
+        }
+        const auto heightAt = [&](std::int64_t column, std::int64_t row)
+        {
+            column = ((column % static_cast<std::int64_t>(kWidth)) + static_cast<std::int64_t>(kWidth))
+                % static_cast<std::int64_t>(kWidth);
+            row = std::clamp(row, std::int64_t{0}, static_cast<std::int64_t>(kHeight) - 1);
+            return alphaSmooth[static_cast<std::size_t>(row) * kWidth + static_cast<std::size_t>(column)];
+        };
+        // The MARCH's height field is the raw coverage (pre-ramp), lightly
+        // blurred: the shell alpha saturates at 1.0 inside every bank, so a
+        // march over it sees no height differential where the clouds are
+        // thickest and fires only on the fringes. The raw coverage carries
+        // the mottle's thickness variation INSIDE banks plus the true
+        // thinning edges, which is the structure mutual shading reads from.
+        // The MARCH's height field is the coverage evaluated with a WIDE
+        // threshold band (softness 8): the normal coverage saturates flat at
+        // 1.0 inside provinces - most of the cloud area - so a march over it
+        // produces only a uniform veil. The wide band keeps the smoothstep
+        // unsaturated, and the output tracks the underlying field
+        // continuously: banks, weather provinces and storm shields all
+        // carry real height structure for the differential to read.
+        std::vector<double> coverageSmooth(static_cast<std::size_t>(kWidth) * kHeight, 0.0);
+        for (std::uint32_t y = 0; y < kHeight; ++y)
+        {
+            for (std::uint32_t x = 0; x < kWidth; ++x)
+            {
+                const planet::Vec3 heightDirection = equirectDirection(x, y, kWidth, kHeight);
+                coverageSmooth[static_cast<std::size_t>(y) * kWidth + x] = planet::clamp01(
+                    cloudField_->coverage(warpCloudSampleDirection(params_, heightDirection),
+                        texelFootprintMeters, 8.0, true));
+            }
+        }
+        {
+            std::vector<double> blurred(coverageSmooth.size(), 0.0);
+            for (std::uint32_t y = 0; y < kHeight; ++y)
+            {
+                for (std::uint32_t x = 0; x < kWidth; ++x)
+                {
+                    const double horizontal
+                        = (coverageSmooth[static_cast<std::size_t>(y) * kWidth
+                            + static_cast<std::size_t>((x + kWidth - 1u) % kWidth)]
+                            + 2.0 * coverageSmooth[static_cast<std::size_t>(y) * kWidth + x]
+                            + coverageSmooth[static_cast<std::size_t>(y) * kWidth
+                                + static_cast<std::size_t>((x + 1u) % kWidth)])
+                            * 0.25;
+                    const double vertical
+                        = (coverageSmooth[static_cast<std::size_t>(std::clamp(y, 1u, kHeight - 1u)) * kWidth + x]
+                            + 2.0 * coverageSmooth[static_cast<std::size_t>(y) * kWidth + x]
+                            + coverageSmooth[static_cast<std::size_t>(std::clamp(y + 1u, 0u, kHeight - 1u)) * kWidth
+                                + x])
+                            * 0.25;
+                    blurred[static_cast<std::size_t>(y) * kWidth + x] = (horizontal + vertical) * 0.5;
+                }
+            }
+            coverageSmooth.swap(blurred);
+        }
+        const auto coverageAt = [&](std::int64_t column, std::int64_t row)
+        {
+            column = ((column % static_cast<std::int64_t>(kWidth)) + static_cast<std::int64_t>(kWidth))
+                % static_cast<std::int64_t>(kWidth);
+            row = std::clamp(row, std::int64_t{0}, static_cast<std::int64_t>(kHeight) - 1);
+            return coverageSmooth[static_cast<std::size_t>(row) * kWidth + static_cast<std::size_t>(column)];
         };
         std::vector<double> relief(kWidth * kHeight, 0.0);
         for (std::uint32_t y = 0; y < kHeight; ++y)
@@ -1585,17 +1777,101 @@ void PlanetChunkRenderer::ensureCloudTexture(const glm::dvec3 &sunDirection)
                     continue; // clear sky has no relief
                 }
                 // Height gradient in texture space (per texel step).
-                const double dAlphaDu = (alphaAt(x + 1, y) - alphaAt(x - 1, y)) * 0.5;
-                const double dAlphaDv = (alphaAt(x, y + 1) - alphaAt(x, y - 1)) * 0.5;
+                const double dAlphaDu = (heightAt(x + 1, y) - heightAt(x - 1, y)) * 0.5;
+                const double dAlphaDv = (heightAt(x, y + 1) - heightAt(x, y - 1)) * 0.5;
                 // East shrinks toward the poles (u steps shrink by cos of
                 // latitude); normalize the physical slope by that factor.
                 const double slope = dAlphaDu * sunEast / cosLatitude - dAlphaDv * sunNorth;
                 relief[texel] = std::clamp(2.0 * slope, -0.45, 0.45);
             }
         }
+        // Self-shadow march: the relief pass tilts brightness with the local
+        // gradient, but VOLUME reads from a bank OCCLUDING its down-sun
+        // neighbor. Each texel steps up-sun through the deck's height proxy
+        // (the blurred alpha); a taller bank on the way shades this texel by
+        // up to 42%, while the texel's own alpha shields it (a crest never
+        // shadows itself, a level deck casts nothing, and a lee slope sits in
+        // its up-sun neighbor's shade). This is the single cue that turns a
+        // painted alpha deck into a lit volume - satellite cumulonimbus
+        // photography is dominated by exactly these up-sun shadow walls.
+        const auto marchOcclusion = [&](std::int64_t column, std::int64_t row, double eastStep, double northStep)
+        {
+            const double center = coverageAt(column, row);
+            double       occlusion = 0.0;
+            // Fourteen hops at 2.5 texels spans ~35 texels - two bank widths
+            // at the bake's 18-texel lobes, the reach a real deck's mutual
+            // shading covers at the sun's grazing angles.
+            for (int hop = 1; hop <= 14; ++hop)
+            {
+                const double distance = hop * 2.5;
+                const std::int64_t sampledColumn = column + static_cast<std::int64_t>(eastStep * distance);
+                const std::int64_t sampledRow = row + static_cast<std::int64_t>(northStep * distance);
+                const double sampled = coverageAt(sampledColumn, sampledRow);
+                // The texel's own thickness shields it: only alpha ABOVE the
+                // texel's own casts shade on it (the crest of the shading
+                // bank stands taller than the shaded slope). The 0.78
+                // shield lets a bank's own flank shade down its lee - a
+                // tall bank reads as a lit crest over a shadowed wall.
+                // Pure differential: only a neighbor TALLER than the texel
+                // shades it, amplified to read at the bake's scale. A crest
+                // (all up-sun neighbors shorter) stays lit, a lee flank
+                // behind a taller bank accumulates the height difference,
+                // and a level deck casts nothing - no uniform veil term.
+                occlusion = std::max(occlusion, 8.0 * (sampled - center));
+                if (occlusion >= 1.0)
+                {
+                    break;
+                }
+            }
+            return std::clamp(occlusion, 0.0, 1.0);
+        };
+        for (std::uint32_t y = 0; y < kHeight; ++y)
+        {
+            const double latitude = glm::pi<double>() * 0.5
+                - glm::pi<double>() * (static_cast<double>(y) + 0.5) / static_cast<double>(kHeight);
+            const double cosLatitude = std::max(1.0e-6, std::cos(latitude));
+            for (std::uint32_t x = 0; x < kWidth; ++x)
+            {
+                const std::size_t texel = static_cast<std::size_t>(y) * kWidth + x;
+                if (alphaAt(static_cast<std::int64_t>(x), static_cast<std::int64_t>(y)) <= 0.02)
+                {
+                    continue; // clear sky has nothing to shade
+                }
+                const double azimuth = glm::two_pi<double>() * (static_cast<double>(x) + 0.5)
+                    / static_cast<double>(kWidth);
+                const planet::Vec3 east{-std::sin(azimuth), 0.0, std::cos(azimuth)};
+                const planet::Vec3 north{-std::sin(latitude) * std::cos(azimuth), std::cos(latitude),
+                    -std::sin(latitude) * std::sin(azimuth)};
+                const planet::Vec3 sunVector{sun.x, sun.y, sun.z};
+                const double sunEast = planet::dot(east, sunVector);
+                const double sunNorth = planet::dot(north, sunVector);
+                const double horizontal = std::sqrt(sunEast * sunEast + sunNorth * sunNorth);
+                if (horizontal < 1.0e-4)
+                {
+                    continue; // sun at the pole's zenith: no lateral shadow to cast
+                }
+                // The march walks TOWARD the sun (the shading bank stands
+                // up-sun); east steps shrink by cos(latitude) the way the
+                // relief pass's gradient does.
+                const double eastStep = sunEast / horizontal / cosLatitude;
+                const double northStep = sunNorth / horizontal;
+                const double occlusion = marchOcclusion(x, y, eastStep, northStep);
+                // The terminator keeps its own gate: near the day/night edge
+                // the sun grazes and every bank casts long shade - the
+                // grazing factor lets the shadow deepen as the sun's tangent
+                // component dominates, the way limb clouds photograph as
+                // dark slabs with bright rims.
+                const double sunDot = sunValid
+                    ? planet::clamp01(planet::dot(equirectDirection(x, y, kWidth, kHeight),
+                        planet::Vec3{sun.x, sun.y, sun.z}))
+                    : 1.0;
+                const double grazing = 1.0 - 0.5 * sunDot;
+                relief[texel] -= 0.70 * occlusion * grazing;
+            }
+        }
         for (std::size_t texel = 0; texel < relief.size(); ++texel)
         {
-            const double gain = 1.0 + relief[texel];
+            const double gain = 1.0 + std::clamp(relief[texel], -0.62, 0.45);
             for (int channel = 0; channel < 3; ++channel)
             {
                 const std::size_t index = texel * 4u + static_cast<std::size_t>(channel);
@@ -1640,6 +1916,23 @@ void PlanetChunkRenderer::ensureCloudTexture(const glm::dvec3 &sunDirection)
         cloudTexturePixels_.swap(blurred);
     }
 
+    if (std::getenv("DEMO_DUMP_CLOUD_BAKE") != nullptr)
+    {
+        std::vector<std::uint8_t> rgb(static_cast<std::size_t>(kWidth) * kHeight * 3u);
+        for (std::size_t texel = 0; texel < static_cast<std::size_t>(kWidth) * kHeight; ++texel)
+        {
+            rgb[texel * 3u + 0u] = cloudTexturePixels_[texel * 4u + 0u];
+            rgb[texel * 3u + 1u] = cloudTexturePixels_[texel * 4u + 1u];
+            rgb[texel * 3u + 2u] = cloudTexturePixels_[texel * 4u + 2u];
+        }
+        std::FILE *bakeFile = std::fopen("/tmp/cloud_bake.ppm", "wb");
+        if (bakeFile != nullptr)
+        {
+            std::fprintf(bakeFile, "P6\n%u %u\n255\n", kWidth, kHeight);
+            std::fwrite(rgb.data(), 1u, rgb.size(), bakeFile);
+            std::fclose(bakeFile);
+        }
+    }
     renderer::TextureDescription description;
     description.width = kWidth;
     description.height = kHeight;
@@ -2149,18 +2442,19 @@ void PlanetChunkRenderer::ensureCloudLayer(const glm::dvec3 &sunDirection)
     }
 
     // Per-pixel cloud shell: a lat-long UV sphere over the cloud altitude.
-    // The 192x96 grid is dense enough that the geometry itself never
-    // limits the cloud structure - every bank edge, wisp fringe and cyclone
-    // arm comes from the texture's alpha, sampled per pixel through the
-    // transparent route (the bake's own fringe blur dissolves the hard
-    // one-texel flake edges, so the quad grid's straight cuts hide inside
-    // the softened fringes). Quads whose four corners all read clear in the
-    // bake are skipped outright, so the mesh only covers the cloudy
-    // provinces and the rasterizer never walks the clear two-thirds of the
-    // shell - the transparent per-sample path is the frame's most expensive
-    // shading, and the gate is what keeps it bounded.
-    constexpr std::uint32_t kSegments = 192;
-    constexpr std::uint32_t kBands = 96;
+    // The 320x160 grid keeps the quad-gate's cut well under the bake's own
+    // texel scale (a gate quad spans ~2 bake texels): every bank edge, wisp
+    // fringe and cyclone arm comes from the texture's alpha, sampled per
+    // pixel through the transparent route (the bake's own fringe blur
+    // dissolves the hard one-texel flake edges, so the quad grid's straight
+    // cuts hide inside the softened fringes). Quads whose four corners all
+    // read clear in the bake are skipped outright, so the mesh only covers
+    // the cloudy provinces and the rasterizer never walks the clear
+    // two-thirds of the shell - the transparent per-sample path is the
+    // frame's most expensive shading, and the gate is what keeps it
+    // bounded.
+    constexpr std::uint32_t kSegments = 320;
+    constexpr std::uint32_t kBands = 160;
     // The quad gate rides well above the blurred fringe's own tail: a quad
     // whose corners sit at sub-visible alpha renders as a pale hard-edged
     // rectangle (the geometry cut reads no matter what the texel alpha

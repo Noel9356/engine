@@ -55,7 +55,7 @@ static_assert(sizeof(ProbeGridUniformData) == 64, "the probe grid header occupie
 
 // Per-frame uniform block (std140), one buffer per frame in flight. Mirrors
 // the FrameData block in shaders/mesh.frag (mesh.vert reads only the leading
-// members, so its block stays untouched by the probe-grid tail).
+// members, so its block stays untouched by the probe-grid and field tails).
 struct FrameUniformData
 {
     float                  viewProj[16]       = {};
@@ -68,8 +68,14 @@ struct FrameUniformData
     float                  directLightMeta[4] = {};
     DirectLightUniformData directLights[32]   = {};
     ProbeGridUniformData   probeGrid          = {};
+    // reflection_field screen-space field header: the field's own camera
+    // (GL convention, the same matrix sampleReflectionField projects through
+    // on the CPU) plus (width, height, max roughness, active) - the shader's
+    // uFieldViewProj / uFieldMeta twins.
+    float                  fieldViewProj[16]  = {};
+    float                  fieldMeta[4]       = {};
 };
-static_assert(sizeof(FrameUniformData) == 2288, "FrameData must match the shader's std140 layout");
+static_assert(sizeof(FrameUniformData) == 2368, "FrameData must match the shader's std140 layout");
 
 class VulkanResources
 {
@@ -80,7 +86,8 @@ public:
     // framesInFlight + material sets, the frame-uniform descriptor sets, and
     // the neutral white/flat-normal stand-in textures.
     bool create(const VulkanDeviceContext &device, std::uint32_t framesInFlight, VkDescriptorSetLayout frameSetLayout,
-        VkDescriptorSetLayout materialSetLayout, bool mipmapsEnabled, float anisotropyLevel,
+        VkDescriptorSetLayout materialSetLayout, VkDescriptorSetLayout materialExtensionSetLayout,
+        bool mipmapsEnabled, float anisotropyLevel,
         std::uint32_t maximumTextures, std::uint32_t maximumMaterialSets);
 
     void destroy();
@@ -99,6 +106,65 @@ public:
     {
         return frameIndex < probeStorageVersions_.size() && probeStorageVersions_[frameIndex] == revision;
     }
+
+    // ---- material extension blocks (set 2, dynamic-offset UBO) -------------
+    // One host-visible ring per frame in flight; each mesh draw acquires a
+    // 48-byte block carrying the material fields that do not fit the
+    // 128-byte push-constant budget (the distance-fog triple, the procedural
+    // mottle pair and the near-field relief overlay's triple - mesh.frag's
+    // MaterialExtension). Identical tuples within a frame share a block, so
+    // a streamed scene's hundreds of chunks spend a handful of blocks.
+
+    // Clears the frame's block cursor and tuple dedupe (call at beginFrame,
+    // after the frame's fence wait).
+    void resetMaterialExtensions(std::uint32_t frameIndex);
+
+    // Writes (or reuses) this material's extension block in the frame's ring
+    // and returns the block's byte offset for the dynamic-offset bind; 0
+    // (the all-off block) when the ring is exhausted.
+    std::uint32_t acquireMaterialExtension(std::uint32_t frameIndex, const MeshMaterial &material);
+
+    // The frame's extension descriptor set (bind at set 2 with the acquired
+    // offset); VK_NULL_HANDLE before create().
+    VkDescriptorSet materialExtensionSet(std::uint32_t frameIndex) const
+    {
+        return frameIndex < materialExtensionSets_.size() ? materialExtensionSets_[frameIndex] : VK_NULL_HANDLE;
+    }
+
+    // ---- reflection_field screen-space field (set 0, binding 2) ------------
+    // One RGBA32F image per frame in flight, refreshed from the module's
+    // latest snapshot through a per-slot staging buffer. The images are
+    // (re)created when the field's dimensions change; a resize retires the
+    // old images through the backend's deferred destroy queue (they may
+    // still be sampled by in-flight frames of other slots).
+
+    // True when the slot's image already holds this field revision (the
+    // upload can be skipped - static scenes keep their field for free).
+    bool reflectionFieldCurrent(std::uint32_t frameIndex, std::uint64_t revision) const
+    {
+        return frameIndex < reflectionFieldVersions_.size() && reflectionFieldVersions_[frameIndex] == revision
+            && reflectionFieldWidth_ != 0;
+    }
+
+    // (Re)creates the per-slot field images when the dimensions change and
+    // rewrites the binding-2 descriptors. Returns false when the objects
+    // could not be created (the hook then stays on the neutral stand-in).
+    bool ensureReflectionFieldImages(std::uint32_t width, std::uint32_t height);
+
+    // Copies a width*height*4 float field into the slot's staging buffer
+    // (persistently mapped) and marks the slot for this revision. Must run
+    // after the slot's previous command buffer retired (the staging buffer
+    // may still be read by it).
+    bool stageReflectionField(std::uint32_t frameIndex, const float *radiance, std::uint32_t width,
+        std::uint32_t height, std::uint64_t revision);
+
+    // Records the staging -> image copy plus the layout barriers on the
+    // frame's command buffer (before the render pass; the copy must precede
+    // every draw that samples the image).
+    void recordReflectionFieldUpload(std::uint32_t frameIndex, VkCommandBuffer command);
+
+    // Advances the resize-retirement countdown; call once per beginFrame.
+    void tickFrame();
 
     VkDescriptorSet frameUniformSet(std::uint32_t frameIndex) const
     {
@@ -124,7 +190,15 @@ public:
         VkBuffer *outVertexBuffer, VkDeviceSize *outVertexBytes, RenderError *error);
 
     bool createTexture(TextureHandle id, const TextureDescription &description, RenderError *error);
+    bool createBlockTexture(TextureHandle id, const BlockTextureDescription &description, RenderError *error);
     void destroyTexture(TextureHandle texture);
+
+    // Which block formats this device samples natively (queried once at
+    // create() through vkGetPhysicalDeviceFormatProperties).
+    [[nodiscard]] BlockTextureFormatSupport blockFormatSupport() const
+    {
+        return blockFormatSupport_;
+    }
 
     // Material descriptor sets are interned per texture-combination; null
     // handles map to the neutral stand-ins. materialSet() allocates on first
@@ -159,7 +233,7 @@ private:
 
     // A material is identified purely by its five texture handles; factors
     // ride in push constants and never invalidate the set.
-    using MaterialKey = std::array<TextureHandle, 5>;
+    using MaterialKey = std::array<TextureHandle, 6>;
 
     struct MaterialKeyHash
     {
@@ -184,6 +258,11 @@ private:
     bool uploadImagePixels(
         VkImage image, std::uint32_t width, std::uint32_t height, std::uint32_t mipLevels, const std::uint8_t *pixels);
 
+    // Uploads every mip level's block payload in one command buffer (one
+    // vkCmdCopyBufferToImage per level; the chain comes from the file, so
+    // no blit pass runs) and leaves the image in SHADER_READ_ONLY_OPTIMAL.
+    bool uploadImageBlocks(VkImage image, const BlockTextureDescription &description, const std::uint8_t *blocks);
+
     bool createNeutralTexture(VulkanTexture &destination, const std::uint8_t pixel[4]);
 
     bool createTextureObjects(VulkanTexture &texture, std::uint32_t width, std::uint32_t height,
@@ -195,6 +274,36 @@ private:
     bool writeMaterialSet(VkDescriptorSet set, const MaterialKey &key);
 
     const VulkanDeviceContext *device_ = nullptr;
+
+    // Material extension ring (set 2): one host-visible buffer and one
+    // dynamic-offset descriptor set per frame in flight. Block layout is
+    // mesh.frag's MaterialExtension (3 x vec4 = 48 bytes), padded to the
+    // device's minUniformBufferOffsetAlignment so every block offset is a
+    // legal dynamic offset.
+    struct MaterialExtensionBlock
+    {
+        float fogColor[4];
+        float fogScaleNoiseScaleNoiseStrength[4];
+        float detailUvScaleStrengthFadeStartFadeEnd[4];
+    };
+    static constexpr std::uint32_t kMaterialExtensionBlockFloats = 12;
+    static constexpr std::uint32_t kMaterialExtensionCapacity    = 256;
+
+    std::vector<VkBuffer>        materialExtensionBuffers_;
+    std::vector<VmaAllocation>   materialExtensionAllocations_;
+    std::vector<void *>          materialExtensionMappings_;
+    std::vector<VkDescriptorSet> materialExtensionSets_;
+    // Per-frame allocator state: the next free block and the tuples already
+    // written this frame (dedupe; identical materials share one block).
+    struct ExtensionTuple
+    {
+        MaterialExtensionBlock block;
+        std::uint32_t          offset;
+        bool                   used = false;
+    };
+    std::vector<std::vector<ExtensionTuple>> materialExtensionTuples_;
+    std::vector<std::uint32_t>               materialExtensionCursors_;
+    std::uint32_t                            materialExtensionStride_ = 256;
 
     std::vector<VkBuffer>        frameUniformBuffers_;
     std::vector<VmaAllocation>   frameUniformAllocations_;
@@ -210,6 +319,41 @@ private:
     std::vector<VmaAllocation>   probeStorageAllocations_;
     std::vector<void *>          probeStorageMappings_;
     std::vector<std::uint64_t>   probeStorageVersions_;
+
+    // reflection_field images: one RGBA32F image + view + staging buffer per
+    // frame in flight, all sharing one nearest-filter clamp sampler (the
+    // shader reads through texelFetch, so no filtering support is needed).
+    struct ReflectionFieldSlot
+    {
+        VkImage       image           = VK_NULL_HANDLE;
+        VmaAllocation imageAllocation = nullptr;
+        VkImageView   view            = VK_NULL_HANDLE;
+        VkBuffer      stagingBuffer   = VK_NULL_HANDLE;
+        VmaAllocation stagingAllocation = nullptr;
+        void         *stagingMapping  = nullptr;
+        bool          stagedThisFrame = false;
+        std::uint64_t stagedRevision  = 0;
+    };
+    std::vector<ReflectionFieldSlot> reflectionFieldSlots_;
+    std::vector<std::uint64_t>       reflectionFieldVersions_;
+    std::uint32_t                    reflectionFieldWidth_  = 0;
+    std::uint32_t                    reflectionFieldHeight_ = 0;
+    VkSampler                        reflectionFieldSampler_ = VK_NULL_HANDLE;
+
+    // Slots replaced by a resize, kept alive until every in-flight frame
+    // that may still sample them has retired (fieldRetireCountdown_ counts
+    // beginFrame calls; tickFrame destroys the set when it reaches zero).
+    std::vector<ReflectionFieldSlot> retiredFieldSlots_;
+    std::uint32_t                    fieldRetireCountdown_ = 0;
+
+    // Destroys one slot's objects (image, view, staging).
+    void destroyReflectionFieldSlot(ReflectionFieldSlot &slot);
+
+    // Rewrites binding 2 onto the neutral white texture (see destroyReflectionFieldObjects).
+    void bindNeutralFieldSampler();
+
+    // Destroys the per-slot field objects (active, retired, sampler).
+    void destroyReflectionFieldObjects();
 
     VkDescriptorPool             descriptorPool_ = VK_NULL_HANDLE;
 
@@ -231,8 +375,10 @@ private:
     bool            hasLastMaterialSet_ = false;
 
     VkDescriptorSetLayout materialSetLayout_   = VK_NULL_HANDLE;
+    VkDescriptorSetLayout materialExtensionSetLayout_ = VK_NULL_HANDLE; // set 2 (mesh pipelines)
     bool                  mipmapsEnabled_          = true;  // [renderer] texture_mipmaps
     bool                  mipmapBlitSupported_     = false; // device supports linear blit on RGBA8
+    BlockTextureFormatSupport blockFormatSupport_ {};      // device-native block formats (KTX path)
     float                 anisotropyLevel_         = 1.0f;
     std::uint32_t         maximumTextures_         = 256;
     std::uint32_t         maximumMaterialSets_     = 256;

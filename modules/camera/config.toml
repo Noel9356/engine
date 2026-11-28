@@ -1,6 +1,10 @@
 [camera]
-far_z               = 100.0
-fov_degrees         = 55.0
+far_z                       = 100.0
+# Fly-mode movement plane: true walks the pitched view direction (free
+# flight), false walks the horizontal plane (first-person; pitch only steers
+# the gaze, Space/Ctrl ride the height axis).
+fly_movement_follows_pitch  = true
+fov_degrees                  = 55.0
 look_down_key       = "down"
 look_left_key       = "left"
 look_right_key      = "right"

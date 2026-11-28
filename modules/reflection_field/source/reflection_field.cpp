@@ -299,6 +299,7 @@ private:
         settings.skySunDiscDegrees     = static_cast<float>(
             floating("sky.sun_disc_angular_radius_deg", 2.3, 0.05, 15.0));
         settings.temporalStrength      = static_cast<float>(floating("temporal.strength", 0.99, 0.0, 1.0));
+        settings.updateBudgetMilliseconds = floating("update_budget_milliseconds", 0.0, 0.0, 1000.0);
         settings.neighborhoodClampSigma = static_cast<float>(
             floating("temporal.neighborhood_clamp_sigma", 1.0, 0.0, 16.0));
         settings.varianceThreshold    = static_cast<float>(floating("filter.variance_threshold", 0.02, 0.0, 4.0));
@@ -802,6 +803,36 @@ private:
         lastEvaluateMilliseconds_ =
             static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count())
             / 1000.0;
+        // Adaptive stride governor (update_budget_milliseconds): an EMA of
+        // the measured evaluate cost retunes the trace interleave in integer
+        // steps (hysteresis: at most one step every 8 frames), so the field
+        // refreshes at whatever rate THIS machine can afford inside the
+        // budget. Stride 1 = every texel every frame (the fixed pipeline).
+        if (settings_.updateBudgetMilliseconds > 0.0 && lastEvaluateMilliseconds_ > 0.0)
+        {
+            state_.tracePhase += 1;
+            state_.governorMeasuredMs = state_.governorMeasuredMs <= 0.0
+                ? lastEvaluateMilliseconds_
+                : 0.7 * state_.governorMeasuredMs + 0.3 * lastEvaluateMilliseconds_;
+            if (state_.governorHoldFrames > 0)
+            {
+                --state_.governorHoldFrames;
+            }
+            else
+            {
+                const double budget = settings_.updateBudgetMilliseconds;
+                if (state_.governorMeasuredMs > budget && state_.traceStride < 8)
+                {
+                    state_.traceStride += 1;
+                    state_.governorHoldFrames = 8;
+                }
+                else if (state_.governorMeasuredMs < budget * 0.7 && state_.traceStride > 1)
+                {
+                    state_.traceStride -= 1;
+                    state_.governorHoldFrames = 8;
+                }
+            }
+        }
         setError(error, ReflectionError::None);
         return true;
     }

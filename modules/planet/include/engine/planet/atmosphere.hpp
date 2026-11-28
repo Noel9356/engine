@@ -282,8 +282,8 @@ private:
     // wisp octaves) and thresholds it into [0, 1]. texelDetail gates the
     // sub-grid octaves and the vortex shear - coverage() passes false and
     // stays bit-identical to its historical output; includeCycloneShear
-    // (the ground twin's gate) drops only the vortex shear while the
-    // texture detail stays.
+    // (the ground twin's gate) drops the whole storm system - the vortex
+    // shear and the shield pattern alike - while the texture detail stays.
     double sampleCoverage(const Vec3 &unitDirection, double lowPassCutoffMeters, double softnessScale,
         bool includeBillow, bool texelDetail, double wispDetail,
         bool includeCycloneShear = true) const;

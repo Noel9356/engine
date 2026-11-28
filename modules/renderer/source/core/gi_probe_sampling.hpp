@@ -329,7 +329,15 @@ ENGINE_SHADING_INLINE bool giProbeGridIrradiance(const PreparedGiProbeGrid &grid
     }
     const glm::vec3 maxBase = glm::vec3(level.dims - glm::ivec3(2));
     const glm::ivec3 base = glm::ivec3(glm::clamp(flooredCell, glm::vec3(0.0f), maxBase));
-    const glm::vec3 fraction = glm::clamp(cell - glm::vec3(base), 0.0f, 1.0f);
+    // Smoothstep per axis (the DDGI probe-blend convention): plain trilinear
+    // weights are C0 but their derivative steps at every lattice boundary,
+    // and on broad flats (a plaza floor, the pool floor through the water)
+    // the step reads as a world-aligned cell grid. The smoothstep keeps the
+    // weights' endpoints and unit sum while making the join C1, so the
+    // lattice stops photographing. The GLSL twin in shaders/mesh.frag
+    // applies the same curve (kept textually in sync).
+    const glm::vec3 raw      = glm::clamp(cell - glm::vec3(base), 0.0f, 1.0f);
+    const glm::vec3 fraction = raw * raw * (3.0f - 2.0f * raw);
 
     // The irradiance sum evaluates each valid probe corner against the shared
     // basis and accumulates its weighted result into ONE vec3 accumulator

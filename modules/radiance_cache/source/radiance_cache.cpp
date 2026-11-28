@@ -64,6 +64,57 @@ glm::mat4 makeTransform(const float *columnMajor16)
     return glm::make_mat4(columnMajor16);
 }
 
+// Writes the governor's scale into the working budgets (ceiling-bounded,
+// floors keep every tier converging): the texel budgets, the probe update
+// budget, the caustic photon count and the gather field's lattice and rays
+// all scale together, because the budget covers the WHOLE evaluate -
+// scaling only one stage leaves the fixed share (probes, gathers, captures)
+// unbounded and the budget meaningless.
+void applyGovernorToBudgets(GiPipelineState &state)
+{
+    if (state.settings.lightingUpdateBudgetMilliseconds <= 0.0 || state.governorScale >= 1.0)
+    {
+        state.settings.captureTexelsPerFrame  = state.captureTexelCeiling;
+        state.settings.directTexelsPerFrame   = state.directTexelCeiling;
+        state.settings.indirectTexelsPerFrame = state.indirectTexelCeiling;
+        state.settings.probeUpdatesPerFrame   = state.probeUpdateCeiling;
+        state.settings.causticsPhotonsPerFrame = state.causticsPhotonCeiling;
+        state.settings.gatherScreenScale      = state.gatherScreenScaleCeiling;
+        state.settings.gatherRaysPerProbe     = state.gatherRayCeiling;
+        return;
+    }
+    // The floors sit at the fixed-cost floor's own scale: an evaluate whose
+    // GBuffer raster, gather and probe passes already cost tens of
+    // milliseconds gains almost nothing by starving the texel budgets below
+    // a few thousand - the frame cost stays at the fixed floor while the
+    // cache's refinement (the quality the budget is buying) slows to a
+    // crawl. Floors at a few thousand texels and a dozen probes keep every
+    // tier converging on a timescale of dozens of frames instead of
+    // hundreds, at frame costs the fixed floor dominated anyway.
+    const double scale = state.governorScale;
+    state.settings.captureTexelsPerFrame  = std::max<std::uint64_t>(4096,
+        static_cast<std::uint64_t>(static_cast<double>(state.captureTexelCeiling) * scale));
+    state.settings.directTexelsPerFrame   = std::max<std::uint64_t>(4096,
+        static_cast<std::uint64_t>(static_cast<double>(state.directTexelCeiling) * scale));
+    state.settings.indirectTexelsPerFrame = std::max<std::uint64_t>(4096,
+        static_cast<std::uint64_t>(static_cast<double>(state.indirectTexelCeiling) * scale));
+    state.settings.probeUpdatesPerFrame   = std::max(16u,
+        static_cast<std::uint32_t>(static_cast<double>(state.probeUpdateCeiling) * scale));
+    state.settings.causticsPhotonsPerFrame = std::max(64u,
+        static_cast<std::uint32_t>(static_cast<double>(state.causticsPhotonCeiling) * scale));
+    // Gather: probes tile at 1/gatherScreenScale, so the lattice spacing
+    // grows with the inverse square root of the scale (work falls
+    // quadratically with the spacing) while the per-probe ray count falls
+    // linearly - together they scale the gather's ray spend by roughly the
+    // governor scale.
+    const double gatherSpacing = 1.0 / std::max(std::sqrt(scale), 0.25);
+    state.settings.gatherScreenScale = std::min(64u,
+        std::max(state.gatherScreenScaleCeiling,
+            static_cast<std::uint32_t>(std::ceil(static_cast<double>(state.gatherScreenScaleCeiling) * gatherSpacing))));
+    state.settings.gatherRaysPerProbe = std::max(1u,
+        static_cast<std::uint32_t>(static_cast<double>(state.gatherRayCeiling) * scale));
+}
+
 // Quality presets and their budget scaling come from
 // engine/renderer/lighting_ray_core.hpp (shared with reflection_field); Auto
 // derives its scale from the host's logical processor count, which this
@@ -97,6 +148,24 @@ void applySettingsToState(const GiSettings &settings, GiPipelineState &state, fl
         std::max(8u, static_cast<std::uint32_t>(std::lround(static_cast<float>(settings.gatherScreenScale) / std::max(scale, 0.25f)))));
     state.settings.gatherFieldScale = std::min(4u,
         std::max(1u, settings.gatherFieldScale + (scale < 0.5f ? 1u : 0u)));
+    // The governor's ceilings - captured AFTER every quality/preset scaling
+    // above, so the adaptive feedback scales the working budgets DOWN from
+    // the effective configured values (never up). A re-application of
+    // settings re-arms the ceilings and the governor keeps scaling from the
+    // fresh base.
+    state.captureTexelCeiling      = state.settings.captureTexelsPerFrame;
+    state.directTexelCeiling       = state.settings.directTexelsPerFrame;
+    state.indirectTexelCeiling     = state.settings.indirectTexelsPerFrame;
+    state.probeUpdateCeiling       = state.settings.probeUpdatesPerFrame;
+    state.causticsPhotonCeiling    = state.settings.causticsPhotonsPerFrame;
+    state.gatherScreenScaleCeiling = state.settings.gatherScreenScale;
+    state.gatherRayCeiling         = state.settings.gatherRaysPerProbe;
+    if (settings.lightingUpdateBudgetMilliseconds <= 0.0)
+    {
+        state.governorScale      = 1.0;
+        state.governorMeasuredMs = 0.0;
+    }
+    applyGovernorToBudgets(state);
 }
 
 
@@ -312,6 +381,7 @@ private:
         settings.sunShadows               = boolean("lighting.sun_shadows", true);
         settings.pointLightShadows        = boolean("lighting.point_light_shadows", false);
         settings.lightingUpdateSpeed      = static_cast<float>(floating("lighting.update_speed", 1.0, 0.05, 16.0));
+        settings.lightingUpdateBudgetMilliseconds = floating("lighting.update_budget_milliseconds", 0.0, 0.0, 1000.0);
         settings.indirectTemporalBlend =
             static_cast<float>(floating("lighting.indirect_temporal_blend", 0.85, 0.0, 0.99));
         settings.maxTraceDistance         = static_cast<float>(floating("trace.max_distance_m", 50.0, 1.0, 2000.0));
@@ -958,6 +1028,24 @@ private:
         lastEvaluateMilliseconds_ =
             static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count())
             / 1000.0;
+        // Adaptive budget governor (lighting.update_budget_milliseconds): an
+        // EMA of the measured evaluate cost feeds back into the next frame's
+        // direct/indirect texel budgets through bounded multiplicative steps
+        // (each frame moves at most 25% toward the target), so the refresh
+        // converges to whatever rate THIS machine can afford inside the
+        // budget instead of a configured texel count that only fits some
+        // hardware. The quality/update_speed-scaled budgets stay the ceiling;
+        // the floor keeps every tier converging.
+        if (settings_.lightingUpdateBudgetMilliseconds > 0.0 && lastEvaluateMilliseconds_ > 0.0)
+        {
+            state_.governorMeasuredMs = state_.governorMeasuredMs <= 0.0
+                ? lastEvaluateMilliseconds_
+                : 0.7 * state_.governorMeasuredMs + 0.3 * lastEvaluateMilliseconds_;
+            const double ratio = settings_.lightingUpdateBudgetMilliseconds / state_.governorMeasuredMs;
+            const double step  = std::clamp(ratio, 0.8, 1.25);
+            state_.governorScale = std::clamp(state_.governorScale * step, 0.02, 1.0);
+            applyGovernorToBudgets(state_);
+        }
         setError(error, GiError::None);
         return true;
     }

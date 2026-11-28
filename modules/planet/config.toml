@@ -369,9 +369,12 @@ clouds_enabled               = true
 # the disc needs to read as a planet instead of a cloud ball.
 cloud_coverage               = 0.40
 # feature scale of the cloud field (raise it with radius_meters like the
-# other large-scale layers; real mid-latitude weather systems run
-# 1,000-2,500 km across, and 0.2 of Earth's radius lands inside that band).
-cloud_wavelength_meters      = 1380000.0
+# other large-scale layers). Real weather SYSTEMS run 1,000-2,500 km across,
+# but the individual masses an orbital photograph reads as "clouds" sit
+# ~200-800 km; the bank wavelength targets that read (the weather field
+# below organizes the banks into the larger systems), so a disc carries
+# dozens of distinct masses instead of a handful of continental smears.
+cloud_wavelength_meters      = 520000.0
 # height of the cloud shell above the datum: real cumulus bases ride
 # ~300-2,400 m over land.
 cloud_altitude_meters        = 2000.0
@@ -663,10 +666,13 @@ color_variation_wavelength_meters = 260.0
 # near-field mottle octave on the same field: ground-level views keep
 # surface texture instead of one unbroken color, and the octave rotates the
 # hue (warm/dry vs cool/lush patches) instead of only shifting brightness.
-# Keep the wavelength above twice the finest voxel (the LOD band limit fades
-# octaves below it - at the showcase's 2.6 m voxels an 11 m mottle renders at
-# full strength).
-color_variation_ground_wavelength_meters = 11.0
+# The wavelength rides WELL above four times the finest voxel (at the
+# showcase's 2.6 m voxels): a vertex field sampled at four vertices per
+# wavelength photographs as stretched linear gradients across the triangles
+# - the "smeared texture" a ground eye reads - so the ground octave stays
+# broad (smooth per-vertex hue patches) and the 1-4 m band belongs to the
+# renderer's per-pixel procedural mottle, which no triangle grid samples.
+color_variation_ground_wavelength_meters = 30.0
 # erosion patches: a sparse ground-scale field pulls vegetated ground toward
 # the bare-soil tone, so biome sheets break into soil scars and worn earth.
 # strength 0 disables; the wavelength is the patch feature size (keep it

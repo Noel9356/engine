@@ -620,7 +620,57 @@ bool GlfwWindowBackend::getWindowAttributes(const WindowRecord &record, WindowAt
     outAttributes->hover              = glfwGetWindowAttrib(window, GLFW_HOVERED) == GLFW_TRUE;
     outAttributes->opacity            = glfwGetWindowOpacity(window);
     glfwGetWindowContentScale(window, &outAttributes->contentScaleX, &outAttributes->contentScaleY);
+    outAttributes->monitorRefreshRateHz = monitorRefreshRateHz(window);
     return true;
+}
+
+// Refresh rate of the monitor the window sits on: its own monitor when
+// fullscreen, otherwise the monitor whose work area covers the largest share
+// of the window rectangle (the primary monitor when the window straddles none
+// - the GLFW convention for "which display owns this window"). A monitor
+// whose current video mode reports no rate, or the no-monitor corner case,
+// answers 0 (unknown) and the caller falls back to its own default.
+double GlfwWindowBackend::monitorRefreshRateHz(GLFWwindow *window) const
+{
+    GLFWmonitor *monitor = glfwGetWindowMonitor(window);
+    if (monitor == nullptr)
+    {
+        int                windowX = 0;
+        int                windowY = 0;
+        int                windowWidth  = 0;
+        int                windowHeight = 0;
+        glfwGetWindowPos(window, &windowX, &windowY);
+        glfwGetWindowSize(window, &windowWidth, &windowHeight);
+        int                 count    = 0;
+        GLFWmonitor **const monitors = glfwGetMonitors(&count);
+        std::int64_t       bestOverlap = -1;
+        for (int index = 0; index < count; ++index)
+        {
+            int monitorX = 0;
+            int monitorY = 0;
+            int monitorWidth  = 0;
+            int monitorHeight = 0;
+            glfwGetMonitorWorkarea(monitors[index], &monitorX, &monitorY, &monitorWidth, &monitorHeight);
+            const int overlapX = std::max(0, std::min(windowX + windowWidth, monitorX + monitorWidth) - std::max(windowX, monitorX));
+            const int overlapY = std::max(0, std::min(windowY + windowHeight, monitorY + monitorHeight) - std::max(windowY, monitorY));
+            const std::int64_t overlap = static_cast<std::int64_t>(overlapX) * overlapY;
+            if (overlap > bestOverlap)
+            {
+                bestOverlap = overlap;
+                monitor     = monitors[index];
+            }
+        }
+        if (monitor == nullptr)
+        {
+            monitor = glfwGetPrimaryMonitor();
+        }
+    }
+    if (monitor == nullptr)
+    {
+        return 0.0;
+    }
+    const GLFWvidmode *mode = glfwGetVideoMode(monitor);
+    return mode != nullptr ? static_cast<double>(mode->refreshRate) : 0.0;
 }
 
 bool GlfwWindowBackend::getContentScale(const WindowRecord &record, float *outX, float *outY) const

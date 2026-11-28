@@ -93,6 +93,37 @@ struct GiAmbientSample
     bool      valid    = false;
 };
 
+// Analytic environment specular (the split-sum approximation of the GGX
+// environment integral, Karis, "Real Shading in Unreal Engine 4"): the
+// hemispheric ambient pair doubles as a two-color environment radiance
+// estimate, so every surface - not just the ones a traced reflection field
+// answered for - carries the grazing-angle sky sheen that separates a
+// rough dielectric from a Lambertian shade. The reflection direction
+// picks between ground and sky radiance; roughness blurs the choice toward
+// the hemispheric mean (a mirror samples its reflection, a fully rough
+// surface sees the direction average); the analytic environment BRDF
+// weighs the surface's f0 and the white-tail share the same way the
+// split-sum lookup table does. ambientOcclusion darkens it exactly like
+// the diffuse ambient it rides with. mesh.frag keeps the twin of this
+// function - changing one side requires updating the other.
+inline glm::vec3 pbrEnvSpecular(const glm::vec3 &normal, const glm::vec3 &view, float roughness, const glm::vec3 &f0,
+    float nDotV, const glm::vec3 &ambientSky, const glm::vec3 &ambientGround, float ambientOcclusion)
+{
+    const glm::vec3 reflected = glm::reflect(-view, normal);
+    const float     blur      = roughness * roughness;
+    const float     lobeUp    = glm::mix(reflected.y * 0.5f + 0.5f, 0.5f, blur);
+    const glm::vec3 radiance  = glm::mix(ambientGround, ambientSky, lobeUp);
+    // The environment BRDF fit: r = roughness * x + y, a004 = ... (the
+    // constants are the published split-sum fit; the clamped exponential
+    // keeps the grazing tail finite exactly like the reference).
+    const glm::vec4 fitX(-1.0f, -0.0275f, -0.572f, 0.022f);
+    const glm::vec4 fitY(1.0f, 0.0425f, 1.04f, -0.04f);
+    const glm::vec4 r        = glm::vec4(roughness) * fitX + fitY;
+    const float     a004     = std::min(r.x * r.x, std::exp(-9.28f * nDotV)) * r.x + r.y;
+    const glm::vec2 ab(-1.04f * a004 + r.z, 1.04f * a004 + r.w);
+    return radiance * (f0 * ab.x + glm::vec3(ab.y)) * ambientOcclusion;
+}
+
 // Full CPU shading pass: hemispheric ambient (or the radiance_cache probe-grid
 // indirect term blended over it by probe validity), one directional sun, then
 // the prepared direct lights (range-faded point/spot attenuation with
@@ -100,17 +131,15 @@ struct GiAmbientSample
 // shader. giGrid is the borrowed probe-grid snapshot; nullptr keeps the
 // legacy ambient path bit-identical. giSample, when non-null, replaces the
 // per-pixel probe walk with a caller-evaluated sample (see GiAmbientSample).
-// The material's opacity is deliberately absent: mesh.frag's diffuse and
-// ambient carry no opacity factor (it reaches the output only through
-// oColor.a and the fixed-function blend), and the commit paths below apply
-// the same single blend - pre-scaling here would composite the diffuse at
-// opacity squared.
+// envSpecularScale weighs the analytic environment specular (see
+// pbrEnvSpecular): callers whose traced reflection field already answered for
+// this sample pass 0 so the two specular-environment terms never double.
 ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec3 &worldPosition,
     const glm::vec3 &cameraPosition, const glm::vec3 &lightDirection, const glm::vec3 &sunRadiance,
     const glm::vec3 &ambientSky, const glm::vec3 &ambientGround, const glm::vec3 &albedo, float metallic,
     float roughness, float ambientOcclusion, const PreparedDirectLight *directLights,
-    std::uint32_t directLightCount, const PreparedGiProbeGrid *giGrid = nullptr, float sheenFactor = 0.0f,
-    const GiAmbientSample *giSample = nullptr)
+    std::uint32_t directLightCount, const PreparedGiProbeGrid *giGrid = nullptr, float opacity = 1.0f,
+    float sheenFactor = 0.0f, const GiAmbientSample *giSample = nullptr, float envSpecularScale = 1.0f)
 {
     // Metallic surfaces carry almost no diffuse response. The hemispheric
     // ambient and the probe-grid GI are diffuse integrals, so they scale by
@@ -163,6 +192,15 @@ ENGINE_SHADING_INLINE glm::vec3 pbrShade(const glm::vec3 &normal, const glm::vec
     const glm::vec3 view    = safeNormalize(cameraPosition - worldPosition);
     const float     nDotV   = std::max(glm::dot(normal, view), 1.0e-4f);
     const glm::vec3 f0      = glm::mix(dielectricF0, albedo, metallic);
+    // Analytic environment specular (see pbrEnvSpecular): the ambient pair
+    // is all the environment this pass knows about, so the term rides every
+    // lit sample - scaled to zero when the caller's traced reflection field
+    // already carries the surface's specular-environment response.
+    if (envSpecularScale > 0.0f)
+    {
+        result += envSpecularScale
+            * pbrEnvSpecular(normal, view, roughness, f0, nDotV, ambientSky, ambientGround, ambientOcclusion);
+    }
     const float     invPi   = 1.0f / glm::pi<float>();
     const glm::vec3 diffuse = albedo * ((1.0f - metallic) * invPi);
     // Fabric (cloth) shading, the twin of shaders/mesh.frag's shadeDirectLight:

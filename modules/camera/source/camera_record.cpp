@@ -69,6 +69,7 @@ CameraRecord CameraRecord::fromParameters(const CameraParameters *parameters, co
     record.sprintMultiplier_   = defaults.sprintMultiplier;
     record.maxDeltaSeconds_    = defaults.maximumDeltaSeconds;
     record.pitchLimitDegrees_  = defaults.pitchLimitDegrees;
+    record.flyMovementFollowsPitch_ = defaults.flyMovementFollowsPitch;
 
     glm::vec3 up(0.0f, 1.0f, 0.0f);
 
@@ -329,6 +330,7 @@ bool CameraRecord::setControlSettings(const CameraControlSettings &settings)
     sprintMultiplier_  = nextSprintMultiplier;
     maxDeltaSeconds_   = nextMaxDeltaSeconds;
     pitchLimitDegrees_ = nextPitchLimitDegrees;
+    flyMovementFollowsPitch_ = settings.flyMovementFollowsPitch;
     const float clampedPitch = std::clamp(pitchDegrees_, -pitchLimitDegrees_, pitchLimitDegrees_);
     if (clampedPitch != pitchDegrees_)
     {
@@ -452,7 +454,12 @@ void CameraRecord::integrate(const CameraInputState *input, double deltaSeconds)
             glm::vec3   movement(0.0f);
             if (moveForward != 0.0f)
             {
-                movement += directionFromYawPitch(yawDegrees_, pitchDegrees_, basis_) * moveForward;
+                // The movement plane is the flyMovementFollowsPitch setting:
+                // the full pitched view direction (free flight) or the
+                // basis's horizontal forward (first-person walking).
+                movement += directionFromYawPitch(
+                    yawDegrees_, flyMovementFollowsPitch_ ? pitchDegrees_ : 0.0f, basis_)
+                    * moveForward;
             }
             if (moveRight != 0.0f)
             {

@@ -53,6 +53,111 @@ engine_fetch_dependency(
     HEADER_ONLY
 )
 
+# libktx (Khronos KTX-Software): KTX 1/2 container parsing, zstd/BasisLZ
+# supercompression inflation and Basis (ETC1S/UASTC) transcoding for
+# createTextureFromFile's KTX path. Built static with the encoder and the
+# command-line tools off: the engine only loads and transcodes.
+set(KTX_FEATURE_TOOLS
+    OFF
+    CACHE BOOL
+          ""
+          FORCE
+)
+set(KTX_FEATURE_TESTS
+    OFF
+    CACHE BOOL
+          ""
+          FORCE
+)
+set(KTX_FEATURE_JNI
+    OFF
+    CACHE BOOL
+          ""
+          FORCE
+)
+set(KTX_FEATURE_PY
+    OFF
+    CACHE BOOL
+          ""
+          FORCE
+)
+set(KTX_FEATURE_DOC
+    OFF
+    CACHE BOOL
+          ""
+          FORCE
+)
+set(KTX_FEATURE_TOOLS_CTS
+    OFF
+    CACHE BOOL
+          ""
+          FORCE
+)
+set(KTX_FEATURE_LOADTEST_APPS
+    OFF
+    CACHE STRING
+          ""
+          FORCE
+)
+set(KTX_FEATURE_VK_UPLOAD
+    OFF
+    CACHE BOOL
+          ""
+          FORCE
+)
+set(KTX_FEATURE_GL_UPLOAD
+    OFF
+    CACHE BOOL
+          ""
+          FORCE
+)
+set(KTX_GIT_VERSION_FULL
+    v4.4.2
+    CACHE STRING
+          ""
+          FORCE
+)
+set(BUILD_SHARED_LIBS
+    OFF
+    CACHE BOOL
+          ""
+          FORCE
+)
+engine_fetch_dependency(
+    ktx
+    OWNER
+    renderer
+    GIT_REPOSITORY
+    https://github.com/KhronosGroup/KTX-Software.git
+    GIT_TAG
+    v4.4.2
+    MAKE_AVAILABLE
+)
+
+# The fetched libktx inherits the engine's Release -march=native, and Basisu's
+# SSE kernels refuse to compile under any AVX family (#error at the top of
+# basisu_kernels_sse.cpp: the CPPSPMD design is written against the x86-64
+# SSE2 baseline). Target-level options append AFTER the inherited architecture
+# flag, so turning the AVX families off for the ktx target alone keeps the
+# engine's own -march=native units (the AVX-512 rasterizer twins) untouched
+# while the Basisu kernels build at the ISA they are written for.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(ktx PRIVATE -mno-avx -mno-avx2 -mno-avx512f)
+endif()
+
+# bcdec: single-header BC1-BC7 software decoder (MIT/Unlicense) used by the
+# KTX path's level-0 mean and the headless backend's block-texture decode.
+engine_fetch_dependency(
+    bcdec
+    OWNER
+    renderer
+    GIT_REPOSITORY
+    https://github.com/iOrange/bcdec.git
+    GIT_TAG
+    80859ed3b7afb1c527a2a99d70c61457bea72d0c
+    HEADER_ONLY
+)
+
 option(
     ENGINE_RENDERER_ENABLE_VULKAN
     "Build the renderer module with the Vulkan backend"
@@ -127,6 +232,7 @@ add_library(
     source/backend/headless/headless_backend.cpp
     source/core/draw_scheduler.cpp
     source/core/frame_inputs.cpp
+    source/core/ktx_texture_loader.cpp
     source/core/render_data.cpp
     source/core/renderer.cpp
     source/core/renderer_settings.cpp
@@ -207,6 +313,8 @@ target_link_libraries(
             engine_radiance_cache_capabilities
             engine_reflection_field_capabilities
             engine_dep_stb
+            engine_dep_bcdec
+            ktx
             meshoptimizer
 )
 

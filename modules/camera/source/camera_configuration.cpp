@@ -139,6 +139,12 @@ void loadCameraDefaults(ParticipantContext &context, CameraDefaults &defaults)
         std::fprintf(stderr, "camera module: [camera] far_z must exceed near_z; using the built-in far plane\n");
         defaults.farZ = std::max(builtInFarZ, defaults.nearZ + 1.0f);
     }
+
+    if (const auto followsPitch = context.configurationBooleanInSection("camera", "fly_movement_follows_pitch");
+        followsPitch.has_value())
+    {
+        defaults.flyMovementFollowsPitch = *followsPitch;
+    }
 }
 
 } // namespace camera

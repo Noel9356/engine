@@ -46,6 +46,11 @@ struct TerrainTextureVariant
     engine::renderer::TextureHandle detail = engine::renderer::invalidTexture;
     engine::renderer::TextureHandle normal = engine::renderer::invalidTexture;
     float meanCompensation[3] = {1.0f, 1.0f, 1.0f};
+    // Biome affinity bitmask (1u << biome): the per-chunk pick only draws
+    // variants whose mask covers the chunk's center biome, so a grassland's
+    // sward never lands on a desert chunk and vice versa. 0 = matches every
+    // biome (the untyped fallback the unaffinitized scans keep).
+    std::uint32_t biomeMask = 0u;
 };
 
 class PlanetChunkRenderer final
@@ -88,6 +93,18 @@ public:
     // variants and their mean compensations stay as registered.
     void setTerrainTextureGates(double groundTextureMaxDistanceMeters,
         double rockTextureMaxDistanceMeters, double groundReliefMaxDistanceMeters);
+
+    // Installs the ground's near-field relief overlay (MeshMaterial's detail
+    // triple): a much finer-tiling normal map whose influence fades in as the
+    // eye approaches - full at detailFadeStartMeters, gone at
+    // detailFadeEndMeters - so the ground gains real grain during the
+    // descent instead of re-showing the same base tiling at every distance.
+    // detailUvScale multiplies the ground UVs into the overlay's tiling
+    // (tileMetersGround / detailTileMeters); invalidTexture disables the
+    // overlay. The overlay rides every ground chunk's material; the per-pixel
+    // distance fade keeps far chunks untouched.
+    void setGroundDetailNormal(engine::renderer::TextureHandle detailNormal, float detailUvScale,
+        float detailFadeStartMeters, float detailFadeEndMeters, float detailStrength);
 
     // Installs the environment lighting the world-anchored cloud shell bakes
     // into its vertex colors (see BackdropLighting). Called before
@@ -297,6 +314,10 @@ private:
         // only memoizes a pure function of the chunk key.
         mutable bool groundSnowy = false;
         mutable bool groundSnowyBuilt = false;
+        // The chunk's center biome (lazily classified with the snow gate:
+        // one climate sample memoizes both reads). The ground variant pick
+        // draws from the biome's own texture pool (see the emit pass).
+        mutable std::uint32_t groundBiomeSlot = 0u;
         std::uint64_t rockHash = 0;        // content hash of the uploaded rock-group mesh
         std::uint64_t waterHash = 0;       // content hash of the uploaded water mesh
     };
@@ -376,6 +397,12 @@ private:
     double groundTextureMaxDistanceMetersSquared_ = 0.0;
     double groundReliefMaxDistanceMetersSquared_ = 0.0;
     double rockTextureMaxDistanceMetersSquared_ = 0.0;
+    // Near-field relief overlay on the ground group (setGroundDetailNormal).
+    engine::renderer::TextureHandle groundDetailNormal_ = engine::renderer::invalidTexture;
+    float groundDetailUvScale_ = 0.0f;
+    float groundDetailFadeStartMeters_ = 2.0f;
+    float groundDetailFadeEndMeters_ = 40.0f;
+    float groundDetailStrength_ = 1.0f;
 
     // Sky dome: unit-radius gradient sphere (positions on the unit ball,
     // colors from the atmosphere model's sun-aware gradient) shared by every

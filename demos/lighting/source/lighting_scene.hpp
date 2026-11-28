@@ -89,6 +89,13 @@ public:
     // camera and the rasterizer's screen-space banding breaks on them).
     void update(double simSeconds, const glm::dvec3 &cameraEyeAnchorRelative);
 
+    // The animated pool's per-update pass: re-bakes the water vertex normals
+    // at the simulation clock's phase (deep-water dispersion, two crossing
+    // swell trains plus a gentle chop - see the water build block), re-uploads
+    // the mesh, and re-describes the surface for both lighting registries so
+    // the refraction and the caustic photon pass follow the moving normals.
+    void updateWater(double simSeconds);
+
     // The frame's draw commands (valid until the next update).
     const std::vector<engine::renderer::RenderDrawCommand> &drawCommands() const { return drawCommands_; }
 
@@ -228,6 +235,27 @@ private:
     std::vector<ShowcasePiece>   showcasePieces_;
     glm::dvec3                   showcasePoolCenter_{0.0, 0.0, 0.0};
     bool                         showcaseBuilt_ = false;
+
+    // Animated water: the ripple normals re-bake every update (the mesh
+    // geometry stays a plane at the water line) from a directional wave
+    // spectrum whose phase advances with the simulation clock, so the glints,
+    // the refraction and the caustic net all drift like a real pool instead
+    // of sitting frozen in the bake. poolWaterVertexScratch_ carries the
+    // whole vertex buffer (12 floats per vertex, the canonical layout); the
+    // update rewrites only the normal floats before the upload, and the
+    // registries re-describe the surface so the traced refraction and the
+    // photon pass follow the moving normals.
+    std::vector<float>                        poolWaterVertexScratch_;
+    std::uint32_t                             poolWaterCellsX_ = 0;
+    std::uint32_t                             poolWaterCellsZ_ = 0;
+    float                                     poolWaterHalfX_ = 0.0f;
+    float                                     poolWaterHalfZ_ = 0.0f;
+    float                                     poolWaterY_     = 0.0f;
+    double                                    poolWaterLastBakeSeconds = -1.0;
+    engine::radiance_cache::GiSurfaceHandle           poolWaterGiSurface_
+        = engine::radiance_cache::invalidGiSurface;
+    engine::reflection_field::ReflectionSurfaceHandle poolWaterReflectionSurface_
+        = engine::reflection_field::invalidReflectionSurface;
 
     // Sky backdrop (see buildSkyBackdrop): one unlit dome mesh, its own
     // material slot outside materialStore_ (the store is rebuilt by

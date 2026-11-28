@@ -10,7 +10,13 @@
 
 [engine]
 active_plugins             = []
-max_fps                 = 0
+# The frame-rate contract for windowed runs: a positive value is a hard cap -
+# the loop never exceeds max_fps (the software pacer enforces it whenever the
+# display's own vsync cap is looser) - and 0 caps the loop at the display's
+# refresh rate (vsync when presentation blocks, otherwise the pacer at the
+# monitor's queried rate). Headless capture and benchmark runs are never
+# throttled.
+max_fps                 = 60
 max_frame_delta_seconds = 0.25
 max_worker_count        = 16
 priority_aging_ms       = 250
@@ -62,9 +68,30 @@ radius_meters          = 6371000.0
 birds_enabled           = true
 bird_flock_count        = 4.0
 bird_flock_size         = 11.0
+# Surface richness: every family draws a little denser so the mid ground
+# reads as lived-in terrain rather than a bare plain (the sward radius is
+# retuned near the scatter keys below). The densities stay modest: the
+# scatter's fill cost grows linearly with them.
+vegetation_grass_density       = 1.2
+vegetation_tree_density        = 1.15
+vegetation_bush_density        = 1.2
+surface_rock_density           = 1.3
 # Cloud shadows are cast by the [pbr] sun above; keep the two directions
 # identical or the shadows disagree with the banks that should cast them.
 cloud_shadow_sun_direction = [0.55, 0.34, 0.76]
+# Cloud shadows at the module's 0.12 default sit below the read threshold -
+# broad terrain photographs flat under an unbroken sun. 0.26 darkens the
+# shaded ground by a quarter, enough that the dappled sun (banks drifting
+# over lit terrain) models the mid ground the way the relief overlay models
+# the near field.
+cloud_shadow_strength = 0.38
+# A readable surf line at the waterline: real coasts photograph a white
+# breaking band where the swash runs out, and without it the water-to-sand
+# edge reads as a painted gradient.
+surf_foam_strength = 0.95
+# A wider shadow penumbra than the banks' own outline: sun arrives around a
+# cloud over several degrees, and a hard-edged shade reads as a stencil cut.
+cloud_shadow_softness = 0.80
 # Sky-shell cloud tuning: the clouds draw PER-PIXEL through the baked cloud
 # texture (the shell and deck meshes only place the sheet), so the edge band
 # stays moderate - each texel carries its own thinning fringe while the
@@ -77,20 +104,40 @@ cloud_shadow_sun_direction = [0.55, 0.34, 0.76]
 # buries the land/ocean contrast (the orbital view is the one frame where
 # the whole field shows at once). 0.30 keeps pronounced banks with real gaps
 # between the systems; the ground sky clears by the same share.
-cloud_coverage_amount = 0.30
-cloud_edge_softness   = 0.22
-cloud_billow_strength = 0.72
-cloud_detail_strength = 0.26
+# The breakup family stays DELIBERATELY gentle (all three near or under the
+# module defaults): the banks must read as coherent masses whose edges
+# break up, not as noise soup. A detail/billow/convective stack anywhere
+# near the base field's own amplitude shreds the thresholded field into
+# disconnected wisps - the "turbulence smoke" read - while the smaller bank
+# wavelength (cloud_wavelength_meters, 520 km: dozens of distinct masses per
+# disc instead of a handful of continental smears) already carries the
+# variety the older large-bank tuning asked the breakup octaves for.
+cloud_coverage_amount = 0.20
+cloud_wavelength_meters = 520000.0
+cloud_edge_softness   = 0.20
+cloud_billow_strength = 0.30
+cloud_detail_strength = 0.12
 # Weather organization (the module's cloud_weather_strength /
 # cloud_latitude_band_strength): the showcase planet's banks organize into
 # large cloudy and clear systems with the circulation-cell banding readable
 # from orbit - the wet equatorial belt, the dry subtropics and the stormy
-# mid-latitude tracks Earth photography shows. The strength stays moderate:
-# the sky keeps long clear lanes between the banks, so the blue gradient,
-# the sun's glare wedge and the warm horizon all read around the scattered
-# cloud (a near-continuous deck turns the golden hour into overcast).
-cloud_weather_strength        = 0.40
-cloud_latitude_band_strength  = 0.30
+# mid-latitude tracks Earth photography shows. The strength is what makes
+# the field BIMODAL the way a real atmosphere photographs: Earth from space
+# splits into solid synoptic systems and broad clear lanes, with the
+# individual masses only a texture inside the systems. A weak weather field
+# leaves every bank its own isolated patch and the disc reads as uniform
+# marble; this strength pushes whole provinces over the coverage threshold
+# so systems read as systems. The banding adds the same contrast by
+# latitude (the wet/dry belts), so the equatorial deck and the subtropical
+# clear lanes frame every globe view.
+cloud_weather_strength        = 0.62
+# The weather field's wavelength: 12x the 520 km banks = ~6,200 km synoptic
+# systems (a third to half the visible disc) - the scale Earth photography
+# organizes clouds into. A multiple near the banks' own scale piles regime
+# boundaries into the same spatial frequency as the banks themselves, and
+# the whole field reads as one self-similar marble texture.
+cloud_weather_wavelength_multiple = 12.0
+cloud_latitude_band_strength  = 0.48
 # The seeded storm family: the spiral shear that wraps nearby banks into
 # comma heads and arms. The strength reads as wrapped but STORM-LOCAL
 # weather at the macro scale: the module clamps each storm's displacement
@@ -102,12 +149,25 @@ cloud_latitude_band_strength  = 0.30
 # ever smear a ground view), so the orbital drama costs the walking sky
 # nothing.
 cloud_cyclone_strength        = 1.2
+# The high cirrus veil (the module's cirrus_strength / cirrus_coverage_
+# amount): a thin ice-crystal streak deck above the cumulus shell. At the
+# ORBITAL read it stays deliberately subtle - real full-disc photography
+# resolves cirrus only as faint filaments at the margins of systems, and a
+# strong veil whites out the whole disc: the cumulus banks, their provinces
+# and the storms all lose contrast under it (the disc reads as an
+# undifferentiated shroud no matter how organized the field below is).
+cirrus_strength           = 0.35
+cirrus_coverage_amount    = 0.18
 # Convective clumping (the module's cloud_convective_strength): the sky
 # above ~25 deg of elevation samples only the few kilometers of cloud shell
 # around the eye's zenith, so the bank-scale field alone reads there as a
 # featureless sheet - the cellular octave carries the cumulus-scale
-# clumping that patch photographs at.
-cloud_convective_strength     = 1.9
+# clumping that patch photographs at. The strength stays NEAR the module's
+# 0.5 default: the octave rides the field BEFORE the threshold, so an
+# over-driven value (the old 1.9) replaced the banks' coherent coverage
+# with noise soup - the roughened clumps the ground sky actually needs
+# read fine at half that.
+cloud_convective_strength     = 0.85
 # Sun-side sky structure overrides (the module's sky_sun_halo_strength /
 # sky_warm_horizon_strength): the halo stays at the module's moderate
 # default (the DISC carries the brightness core - a saturated sky glare
@@ -131,14 +191,25 @@ sky_warm_horizon_strength = 0.90
 # foreground color punchy). The asymptote keeps a quarter of the far
 # terrain so the horizon band still reads as terrain dissolving, never
 # as fog swallowing the frame.
-aerial_perspective_scale_meters = 3800.0
-aerial_perspective_asymptote     = 0.75
+aerial_perspective_scale_meters = 5000.0
+aerial_perspective_asymptote    = 0.58
 # Grass sward radius (the module's vegetation_grass_radius_meters): the
 # midground's bare band between the near disc and the first trees read as
-# empty plain, so the sward's single-card ring carries out to 90 m where
-# the mid ring's 1.4 m lattice keeps the fill cost flat.
-vegetation_grass_radius_meters   = 90.0
+# empty plain. The sward now runs in three rings (the dense near disc, the
+# 1.4 m mid lattice to 48 m, and a 3.2 m far lattice out to the radius), so
+# 150 m covers the whole readable mid ground at a fill cost the mid ring
+# alone could not carry - the far ring's coarse cards read as ground cover,
+# not geometry.
+vegetation_grass_radius_meters   = 150.0
 
+# The baked contact-shadow ribbons stay ON (the planet module's
+# surface_shadow_strength, module default 1.0): the renderer's sun map now
+# carries alpha-cutout casters engine-side, but a billboard card that faces
+# the EYE stands EDGE-ON to the sun, so a scatter stand's rasterized shadow
+# footprint is still a thin line whatever the cutout masks - shading the
+# vegetation through the map needs sun-facing caster cards the scene does
+# not build yet. Until it does, the ribbons and the planet module's cloud
+# shadows are the shadows that carry the sun's direction through the frame.
 [renderer]
 clear_color = [0.012, 0.014, 0.028, 1.0]
 # Presentation bloom rides its OWN defaults softened for general scenes
@@ -167,15 +238,16 @@ back_face_culling = false
 # mesh handle would scramble that order. Submission order it is.
 draw_sort_mode = "off"
 # Sun shadow mapping stays OFF for this scene (the renderer's sun_shadows):
-# the measured A/B across the round-3 and round-4 compositions agrees - the
-# pass moves under 0.1% of the pixels. The casters that would matter are
-# the scatter's billboard stands, and a card that faces the EYE stands
-# EDGE-ON to the sun, so its rasterized shadow footprint is a thin line
-# (the rolling terrain never self-occludes at the map's texel scale
-# either). The scene's readable shadows are the scatter's sun-aligned
-# contact-shadow quads (surface_shadow_strength) and the planet module's
-# cloud shadows - those carry the sun's direction through the frame.
-sun_shadows = false
+# the measured A/B agrees - the pass moves under 0.1% of the pixels,
+# because the casters that would matter are the scatter's billboard stands
+# and a card that faces the EYE stands EDGE-ON to the sun (its rasterized
+# shadow footprint is a thin line, alpha cutout or not; the rolling
+# terrain never self-occludes at the map's texel scale either). Shading
+# the vegetation through the map needs sun-facing caster cards, which the
+# scene does not build yet. The scene's readable shadows are the scatter's
+# sun-aligned contact-shadow ribbons (surface_shadow_strength above) and
+# the planet module's cloud shadows - those carry the sun's direction
+# through the frame.
 
 [trust]
 trustModules = ["renderer"]

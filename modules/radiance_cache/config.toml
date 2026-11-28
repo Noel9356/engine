@@ -51,6 +51,13 @@ point_light_shadows         = false
 # Lumen's "Lumen Scene Lighting Update Speed"; scales how fast the cached
 # lighting is re-evaluated relative to the budgets above.
 update_speed                = 1.0
+# Wall-clock budget for the whole evaluate, in milliseconds. 0 keeps the
+# fixed per-frame budgets above; a positive value engages the adaptive
+# governor: an exponential moving average of the measured evaluate cost
+# feeds back into the texel/probe/photon/gather budgets (bounded
+# multiplicative steps, ceilings at the scaled configured values), so the
+# cache refreshes at whatever rate the host can afford inside the budget.
+update_budget_milliseconds  = 0.0
 # Weight of the cached history when a texel is refreshed (0 = replace with the
 # fresh gather, 0.99 = almost never change). The first update of a texel
 # always takes the fresh sample whole. Raised alongside the one-ray gather so

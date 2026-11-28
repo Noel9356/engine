@@ -158,6 +158,14 @@ struct GiSettings
     bool          sunShadows                 = true;
     bool          pointLightShadows          = false;
     float         lightingUpdateSpeed        = 1.0f;
+    // Wall-clock budget for the whole evaluate (lighting.update_budget_milliseconds).
+    // 0 keeps the fixed per-frame texel budgets; a positive value engages
+    // the adaptive governor: the measured evaluate cost feeds back into the
+    // direct/indirect texel budgets (bounded multiplicative steps), so the
+    // cache refreshes at whatever rate THIS machine can afford instead of a
+    // configured texel count that only fits some hardware. The configured
+    // budgets (after quality/update_speed scaling) remain the ceiling.
+    double        lightingUpdateBudgetMilliseconds = 0.0;
     float         indirectTemporalBlend      = 0.85f;
     float         maxTraceDistance           = 50.0f;
     // Surface offset applied to shadow, gather, and probe rays (see
@@ -619,6 +627,21 @@ struct GiProbeItem
 struct GiPipelineState
 {
     GiSettings settings;
+
+    // Adaptive budget governor (settings.lightingUpdateBudgetMilliseconds):
+    // the ceilings are the quality/update_speed-scaled budgets
+    // applySettingsToState last resolved, and the scale adapts toward the
+    // wall-clock budget in bounded multiplicative steps (see evaluateImpl's
+    // feedback block). 1.0 = run at the full configured budgets.
+    std::uint64_t captureTexelCeiling   = 0;
+    std::uint64_t directTexelCeiling    = 0;
+    std::uint64_t indirectTexelCeiling  = 0;
+    std::uint32_t probeUpdateCeiling    = 0;
+    std::uint32_t causticsPhotonCeiling = 0;
+    std::uint32_t gatherScreenScaleCeiling = 8;
+    std::uint32_t gatherRayCeiling      = 0;
+    double        governorScale         = 1.0;
+    double        governorMeasuredMs    = 0.0;
 
     // Registry (mirrors the module's registry under the module mutex).
     std::vector<GiSurface>   surfaces;
